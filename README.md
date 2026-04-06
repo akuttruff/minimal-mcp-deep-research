@@ -14,7 +14,7 @@ Forked from [`minimal-mcp-web-search`](https://github.com/akuttruff/minimal-mcp-
 
 ## Dependencies
 
-One runtime dependency: `@modelcontextprotocol/sdk`. No API keys, no zod, no heavyweight frameworks.
+One runtime dependency: `@modelcontextprotocol/sdk`
 
 ## Setup
 
