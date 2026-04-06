@@ -23,14 +23,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   switch (name) {
     case "research": {
-      const queries = (args as Record<string, unknown>)?.queries;
-      if (!Array.isArray(queries) || queries.length === 0 || !queries.every((q) => typeof q === "string" && q.trim() !== "")) {
+      const rawQueries = (args as Record<string, unknown>)?.queries;
+      const rawQuery = (args as Record<string, unknown>)?.query;
+      const queries: string[] = Array.isArray(rawQueries)
+        ? rawQueries.filter((q): q is string => typeof q === "string" && q.trim() !== "")
+        : typeof rawQuery === "string" && rawQuery.trim() !== ""
+          ? [rawQuery]
+          : [];
+      if (queries.length === 0) {
         return {
-          content: [{ type: "text" as const, text: "Missing or invalid 'queries' parameter. Provide a non-empty array of search query strings." }],
+          content: [{ type: "text" as const, text: "Provide at least one search query via 'query' (string) or 'queries' (array of strings)." }],
           isError: true,
         };
       }
-      const result = await deepResearch(queries as string[]);
+      const result = await deepResearch(queries);
       return {
         content: [{ type: "text" as const, text: wrapAsData("research", result) }],
       };

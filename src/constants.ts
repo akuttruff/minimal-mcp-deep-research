@@ -28,13 +28,16 @@ export const TOOLS = [
     inputSchema: {
       type: "object" as const,
       properties: {
+        query: {
+          type: "string",
+          description: "A single search query. For broader results, use the queries parameter instead.",
+        },
         queries: {
           type: "array",
           items: { type: "string" },
-          description: "One or more search queries — use multiple varied queries for thorough research",
+          description: "Multiple search queries approaching the topic from different angles for thorough research.",
         },
       },
-      required: ["queries"],
     },
   },
   {
