@@ -1,3 +1,12 @@
+import {
+  DUCKDUCKGO_SEARCH_URL,
+  FETCH_TIMEOUT_MS,
+  MAX_CONTENT_LENGTH,
+  RESEARCH_FETCH_COUNT,
+  SEARCH_RESULTS_LIMIT,
+  USER_AGENT,
+} from "./constants.js";
+
 export function stripHtml(html: string): string {
   // Remove <head> entirely (title, meta, inline CSS/JS bleed into text otherwise)
   let text = html.replace(/<head[^>]*>[\s\S]*?<\/head>/gi, "");
@@ -42,11 +51,9 @@ export function stripHtml(html: string): string {
   return text.trim();
 }
 
-export const MAX_CONTENT_LENGTH = 10_000;
-
 export function truncate(text: string): string {
   if (text.length <= MAX_CONTENT_LENGTH) return text;
-  return text.slice(0, MAX_CONTENT_LENGTH) + "\n\n[Content truncated at 10,000 characters]";
+  return text.slice(0, MAX_CONTENT_LENGTH) + `\n\n[Content truncated at ${MAX_CONTENT_LENGTH.toLocaleString()} characters]`;
 }
 
 export function wrapAsData(toolName: string, content: string): string {
@@ -66,11 +73,11 @@ export interface SearchResults {
   urls: string[];
 }
 
-export async function webSearch(query: string, limit = 10): Promise<SearchResults> {
-  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+export async function webSearch(query: string): Promise<SearchResults> {
+  const url = `${DUCKDUCKGO_SEARCH_URL}?q=${encodeURIComponent(query)}`;
 
   const response = await fetch(url, {
-    headers: { "User-Agent": "MinimalMCP/1.0" },
+    headers: { "User-Agent": USER_AGENT },
   });
 
   if (!response.ok) {
@@ -85,7 +92,7 @@ export async function webSearch(query: string, limit = 10): Promise<SearchResult
 
   let match: RegExpExecArray | null;
   let count = 0;
-  while ((match = resultPattern.exec(html)) !== null && count < limit) {
+  while ((match = resultPattern.exec(html)) !== null && count < SEARCH_RESULTS_LIMIT) {
     const resultUrl = decodeURIComponent(
       match[1]?.replace(/.*uddg=([^&]*).*/, "$1") ?? match[1] ?? ""
     );
@@ -103,11 +110,11 @@ export async function webSearch(query: string, limit = 10): Promise<SearchResult
   return { text: results.join("\n\n"), urls };
 }
 
-export async function deepResearch(query: string, fetchCount = 3): Promise<string> {
-  const { text: searchText, urls } = await webSearch(query, 10);
+export async function deepResearch(query: string): Promise<string> {
+  const { text: searchText, urls } = await webSearch(query);
 
   const pages = await Promise.all(
-    urls.slice(0, fetchCount).map(async (url) => {
+    urls.slice(0, RESEARCH_FETCH_COUNT).map(async (url) => {
       const content = await fetchPage(url);
       return `### Source: ${url}\n\n${content}`;
     })
@@ -135,8 +142,8 @@ export async function fetchPage(url: string): Promise<string> {
 
   try {
     const response = await fetch(url, {
-      headers: { "User-Agent": "MinimalMCP/1.0" },
-      signal: AbortSignal.timeout(10_000),
+      headers: { "User-Agent": USER_AGENT },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       redirect: "follow",
     });
 
@@ -154,7 +161,7 @@ export async function fetchPage(url: string): Promise<string> {
     return truncate(text);
   } catch (error) {
     if (error instanceof Error && error.name === "TimeoutError") {
-      return "Request timed out after 10 seconds.";
+      return `Request timed out after ${FETCH_TIMEOUT_MS / 1_000} seconds.`;
     }
     return `Fetch error: ${error instanceof Error ? error.message : String(error)}`;
   }

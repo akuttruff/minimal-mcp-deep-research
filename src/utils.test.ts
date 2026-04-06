@@ -1,6 +1,7 @@
 import { describe, it, mock, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { stripHtml, truncate, wrapAsData, fetchPage, MAX_CONTENT_LENGTH } from "./utils.js";
+import { stripHtml, truncate, wrapAsData, fetchPage } from "./utils.js";
+import { FETCH_TIMEOUT_MS, MAX_CONTENT_LENGTH } from "./constants.js";
 
 // --- stripHtml ---
 
