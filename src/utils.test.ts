@@ -379,13 +379,13 @@ describe("deepResearch", () => {
     mock.restoreAll();
   });
 
-  const makeSearchResponse = (count: number) =>
+  const makeSearchResponse = (count: number, prefix = "") =>
     new Response(
       makeDDGHtml(
         Array.from({ length: count }, (_, i) => ({
-          url: `https://example.com/${i + 1}`,
-          title: `Title ${i + 1}`,
-          snippet: `Snippet ${i + 1}`,
+          url: `https://example.com/${prefix}${i + 1}`,
+          title: `${prefix}Title ${i + 1}`,
+          snippet: `${prefix}Snippet ${i + 1}`,
         }))
       ),
       { status: 200, headers: { "content-type": "text/html" } }
@@ -398,45 +398,72 @@ describe("deepResearch", () => {
     });
 
   it("includes both ## Search Results and ## Page Contents sections", async () => {
-    let isFirstCall = true;
+    let searchCount = 0;
     mock.method(globalThis, "fetch", async (url: string) => {
-      if (isFirstCall) { isFirstCall = false; return makeSearchResponse(3); }
+      if (searchCount === 0) { searchCount++; return makeSearchResponse(3); }
       return makePageResponse(url);
     });
-    const result = await deepResearch("test query");
+    const result = await deepResearch(["test query"]);
     assert.ok(result.includes("## Search Results"));
     assert.ok(result.includes("## Page Contents"));
   });
 
   it("includes search snippets in the output", async () => {
-    let isFirstCall = true;
+    let searchCount = 0;
     mock.method(globalThis, "fetch", async (url: string) => {
-      if (isFirstCall) { isFirstCall = false; return makeSearchResponse(3); }
+      if (searchCount === 0) { searchCount++; return makeSearchResponse(3); }
       return makePageResponse(url);
     });
-    const result = await deepResearch("test query");
+    const result = await deepResearch(["test query"]);
     assert.ok(result.includes("Title 1"));
     assert.ok(result.includes("Snippet 1"));
   });
 
-  it("fetches exactly RESEARCH_FETCH_COUNT pages", async () => {
+  it("fetches at most RESEARCH_FETCH_COUNT pages", async () => {
     let fetchCount = 0;
     mock.method(globalThis, "fetch", async (url: string) => {
       fetchCount++;
       if (fetchCount === 1) return makeSearchResponse(RESEARCH_FETCH_COUNT + 2);
       return makePageResponse(url);
     });
-    await deepResearch("test query");
+    await deepResearch(["test query"]);
     assert.equal(fetchCount - 1, RESEARCH_FETCH_COUNT);
   });
 
   it("labels each fetched page with its source URL", async () => {
-    let isFirstCall = true;
+    let searchCount = 0;
     mock.method(globalThis, "fetch", async (url: string) => {
-      if (isFirstCall) { isFirstCall = false; return makeSearchResponse(3); }
+      if (searchCount === 0) { searchCount++; return makeSearchResponse(3); }
       return makePageResponse(url);
     });
-    const result = await deepResearch("test query");
+    const result = await deepResearch(["test query"]);
     assert.ok(result.includes("### Source: https://example.com/1"));
+  });
+
+  it("searches all queries in parallel and combines results", async () => {
+    let searchCount = 0;
+    mock.method(globalThis, "fetch", async (url: string) => {
+      if (searchCount < 2) {
+        searchCount++;
+        return makeSearchResponse(2, searchCount === 1 ? "a" : "b");
+      }
+      return makePageResponse(url);
+    });
+    const result = await deepResearch(["query one", "query two"]);
+    assert.ok(result.includes("aTitle 1"));
+    assert.ok(result.includes("bTitle 1"));
+  });
+
+  it("deduplicates URLs across multiple queries", async () => {
+    let fetchCount = 0;
+    mock.method(globalThis, "fetch", async (url: string) => {
+      fetchCount++;
+      // Both queries return the same URLs
+      if (fetchCount <= 2) return makeSearchResponse(3);
+      return makePageResponse(url);
+    });
+    await deepResearch(["query one", "query two"]);
+    // 2 search fetches + RESEARCH_FETCH_COUNT page fetches (not 2x because of dedup)
+    assert.equal(fetchCount, 2 + RESEARCH_FETCH_COUNT);
   });
 });

@@ -132,11 +132,21 @@ export async function webSearch(query: string): Promise<SearchResults> {
   return { text: results.join("\n\n"), urls };
 }
 
-export async function deepResearch(query: string): Promise<string> {
-  const { text: searchText, urls } = await webSearch(query);
+export async function deepResearch(queries: string[]): Promise<string> {
+  const searchResults = await Promise.all(queries.map((q) => webSearch(q)));
+
+  const allText = searchResults.map((r) => r.text).join("\n\n");
+  const seen = new Set<string>();
+  const uniqueUrls = searchResults
+    .flatMap((r) => r.urls)
+    .filter((url) => {
+      if (seen.has(url)) return false;
+      seen.add(url);
+      return true;
+    });
 
   const pages = await Promise.all(
-    urls.slice(0, RESEARCH_FETCH_COUNT).map(async (url) => {
+    uniqueUrls.slice(0, RESEARCH_FETCH_COUNT).map(async (url) => {
       const content = await fetchPage(url);
       return `### Source: ${url}\n\n${content}`;
     })
@@ -144,7 +154,7 @@ export async function deepResearch(query: string): Promise<string> {
 
   return [
     "## Search Results\n",
-    searchText,
+    allText,
     "\n## Page Contents\n",
     pages.join("\n\n---\n\n"),
   ].join("\n");

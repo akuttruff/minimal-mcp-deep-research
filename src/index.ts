@@ -23,14 +23,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   switch (name) {
     case "research": {
-      const query = (args as Record<string, unknown>)?.query;
-      if (typeof query !== "string" || query.trim() === "") {
+      const queries = (args as Record<string, unknown>)?.queries;
+      if (!Array.isArray(queries) || queries.length === 0 || !queries.every((q) => typeof q === "string" && q.trim() !== "")) {
         return {
-          content: [{ type: "text" as const, text: "Missing or empty 'query' parameter." }],
+          content: [{ type: "text" as const, text: "Missing or invalid 'queries' parameter. Provide a non-empty array of search query strings." }],
           isError: true,
         };
       }
-      const result = await deepResearch(query);
+      const result = await deepResearch(queries as string[]);
       return {
         content: [{ type: "text" as const, text: wrapAsData("research", result) }],
       };
