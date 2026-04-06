@@ -61,6 +61,66 @@ export function wrapAsData(toolName: string, content: string): string {
   ].join("\n");
 }
 
+export interface SearchResults {
+  text: string;
+  urls: string[];
+}
+
+export async function webSearch(query: string, limit = 10): Promise<SearchResults> {
+  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+
+  const response = await fetch(url, {
+    headers: { "User-Agent": "MinimalMCP/1.0" },
+  });
+
+  if (!response.ok) {
+    return { text: `Search failed with status ${response.status}`, urls: [] };
+  }
+
+  const html = await response.text();
+  const results: string[] = [];
+  const urls: string[] = [];
+  const resultPattern =
+    /<a[^>]+class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
+
+  let match: RegExpExecArray | null;
+  let count = 0;
+  while ((match = resultPattern.exec(html)) !== null && count < limit) {
+    const resultUrl = decodeURIComponent(
+      match[1]?.replace(/.*uddg=([^&]*).*/, "$1") ?? match[1] ?? ""
+    );
+    const title = stripHtml(match[2] ?? "");
+    const snippet = stripHtml(match[3] ?? "");
+    results.push(`[${count + 1}] ${title}\n    URL: ${resultUrl}\n    ${snippet}`);
+    urls.push(resultUrl);
+    count++;
+  }
+
+  if (results.length === 0) {
+    return { text: "No results found.", urls: [] };
+  }
+
+  return { text: results.join("\n\n"), urls };
+}
+
+export async function deepResearch(query: string, fetchCount = 3): Promise<string> {
+  const { text: searchText, urls } = await webSearch(query, 10);
+
+  const pages = await Promise.all(
+    urls.slice(0, fetchCount).map(async (url) => {
+      const content = await fetchPage(url);
+      return `### Source: ${url}\n\n${content}`;
+    })
+  );
+
+  return [
+    "## Search Results\n",
+    searchText,
+    "\n## Page Contents\n",
+    pages.join("\n\n---\n\n"),
+  ].join("\n");
+}
+
 export async function fetchPage(url: string): Promise<string> {
   let parsed: URL;
   try {
