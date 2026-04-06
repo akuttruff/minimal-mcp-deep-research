@@ -1,7 +1,18 @@
 import { describe, it, mock, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { stripHtml, truncate, wrapAsData, fetchPage } from "./utils.js";
-import { FETCH_TIMEOUT_MS, MAX_CONTENT_LENGTH } from "./constants.js";
+import { stripHtml, truncate, wrapAsData, fetchPage, webSearch, deepResearch } from "./utils.js";
+import { FETCH_TIMEOUT_MS, MAX_CONTENT_LENGTH, RESEARCH_FETCH_COUNT, SEARCH_RESULTS_LIMIT } from "./constants.js";
+
+// Builds minimal DuckDuckGo HTML containing the patterns webSearch parses
+const makeDDGHtml = (results: { url: string; title: string; snippet: string }[]) =>
+  results
+    .map(
+      ({ url, title, snippet }) =>
+        `<a class="result__a" href="/l/?uddg=${encodeURIComponent(url)}">${title}</a>
+        filler
+        <a class="result__snippet">${snippet}</a>`
+    )
+    .join("\n");
 
 // --- stripHtml ---
 
@@ -230,5 +241,132 @@ describe("fetchPage", () => {
       throw new Error("network failure");
     });
     assert.equal(await fetchPage("https://example.com"), "Fetch error: network failure");
+  });
+});
+
+// --- webSearch ---
+
+describe("webSearch", () => {
+  beforeEach(() => {
+    mock.restoreAll();
+  });
+
+  it("returns matching text and urls on a successful response", async () => {
+    mock.method(globalThis, "fetch", async () =>
+      new Response(
+        makeDDGHtml([{ url: "https://example.com", title: "Example", snippet: "An example site." }]),
+        { status: 200, headers: { "content-type": "text/html" } }
+      )
+    );
+    const result = await webSearch("test");
+    assert.ok(result.text.includes("Example"));
+    assert.ok(result.text.includes("An example site."));
+    assert.deepEqual(result.urls, ["https://example.com"]);
+  });
+
+  it("returns error text and empty urls on a non-ok response", async () => {
+    mock.method(globalThis, "fetch", async () =>
+      new Response(null, { status: 503 })
+    );
+    const result = await webSearch("test");
+    assert.ok(result.text.includes("503"));
+    assert.deepEqual(result.urls, []);
+  });
+
+  it("returns no results when the response HTML has no matching patterns", async () => {
+    mock.method(globalThis, "fetch", async () =>
+      new Response("<html><body>nothing here</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      })
+    );
+    const result = await webSearch("test");
+    assert.equal(result.text, "No results found.");
+    assert.deepEqual(result.urls, []);
+  });
+
+  it("returns at most SEARCH_RESULTS_LIMIT results", async () => {
+    const many = Array.from({ length: SEARCH_RESULTS_LIMIT + 5 }, (_, i) => ({
+      url: `https://example.com/${i}`,
+      title: `Title ${i}`,
+      snippet: `Snippet ${i}`,
+    }));
+    mock.method(globalThis, "fetch", async () =>
+      new Response(makeDDGHtml(many), {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      })
+    );
+    const result = await webSearch("test");
+    assert.equal(result.urls.length, SEARCH_RESULTS_LIMIT);
+  });
+});
+
+// --- deepResearch ---
+
+describe("deepResearch", () => {
+  beforeEach(() => {
+    mock.restoreAll();
+  });
+
+  const makeSearchResponse = (count: number) =>
+    new Response(
+      makeDDGHtml(
+        Array.from({ length: count }, (_, i) => ({
+          url: `https://example.com/${i + 1}`,
+          title: `Title ${i + 1}`,
+          snippet: `Snippet ${i + 1}`,
+        }))
+      ),
+      { status: 200, headers: { "content-type": "text/html" } }
+    );
+
+  const makePageResponse = (url: string) =>
+    new Response(`<p>Content from ${url}</p>`, {
+      status: 200,
+      headers: { "content-type": "text/html" },
+    });
+
+  it("includes both ## Search Results and ## Page Contents sections", async () => {
+    let isFirstCall = true;
+    mock.method(globalThis, "fetch", async (url: string) => {
+      if (isFirstCall) { isFirstCall = false; return makeSearchResponse(3); }
+      return makePageResponse(url);
+    });
+    const result = await deepResearch("test query");
+    assert.ok(result.includes("## Search Results"));
+    assert.ok(result.includes("## Page Contents"));
+  });
+
+  it("includes search snippets in the output", async () => {
+    let isFirstCall = true;
+    mock.method(globalThis, "fetch", async (url: string) => {
+      if (isFirstCall) { isFirstCall = false; return makeSearchResponse(3); }
+      return makePageResponse(url);
+    });
+    const result = await deepResearch("test query");
+    assert.ok(result.includes("Title 1"));
+    assert.ok(result.includes("Snippet 1"));
+  });
+
+  it("fetches exactly RESEARCH_FETCH_COUNT pages", async () => {
+    let fetchCount = 0;
+    mock.method(globalThis, "fetch", async (url: string) => {
+      fetchCount++;
+      if (fetchCount === 1) return makeSearchResponse(RESEARCH_FETCH_COUNT + 2);
+      return makePageResponse(url);
+    });
+    await deepResearch("test query");
+    assert.equal(fetchCount - 1, RESEARCH_FETCH_COUNT);
+  });
+
+  it("labels each fetched page with its source URL", async () => {
+    let isFirstCall = true;
+    mock.method(globalThis, "fetch", async (url: string) => {
+      if (isFirstCall) { isFirstCall = false; return makeSearchResponse(3); }
+      return makePageResponse(url);
+    });
+    const result = await deepResearch("test query");
+    assert.ok(result.includes("### Source: https://example.com/1"));
   });
 });
