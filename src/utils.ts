@@ -14,13 +14,32 @@ export function stripHtml(html: string): string {
   text = text.replace(/<!--[\s\S]*?-->/g, "");
   // Remove script, style, noscript tags and their contents
   text = text.replace(/<(script|style|noscript)[^>]*>[\s\S]*?<\/\1>/gi, "");
+  // Remove navigation noise entirely (nav, footer, aside contain chrome, not content)
+  text = text.replace(/<(nav|footer|aside)[^>]*>[\s\S]*?<\/\1>/gi, "");
+  // Extract <main> content when available — skip the page chrome, focus on the article
+  const mainMatch = text.match(/<main[^>]*>([\s\S]*?)<\/main>/i);
+  if (mainMatch) {
+    text = mainMatch[1] ?? text;
+  }
+  // Convert links to markdown before stripping tags
+  text = text.replace(/<a[^>]+href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, (_, href: string, inner: string) => {
+    const linkText = inner.replace(/<[^>]+>/g, "").trim();
+    return linkText ? `[${linkText}](${href})` : "";
+  });
+  // Preserve code blocks as markdown fenced blocks
+  text = text.replace(/<pre[^>]*><code[^>]*>([\s\S]*?)<\/code><\/pre>/gi, "\n```\n$1\n```\n");
+  text = text.replace(/<pre[^>]*>([\s\S]*?)<\/pre>/gi, "\n```\n$1\n```\n");
+  text = text.replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, "`$1`");
+  // Preserve bold and italic as markdown
+  text = text.replace(/<(strong|b)[^>]*>([\s\S]*?)<\/\1>/gi, "**$2**");
+  text = text.replace(/<(em|i)[^>]*>([\s\S]*?)<\/\1>/gi, "*$2*");
   // Preserve heading hierarchy as markdown
   text = text.replace(/<h1[^>]*>/gi, "\n# ").replace(/<\/h1>/gi, "\n");
   text = text.replace(/<h2[^>]*>/gi, "\n## ").replace(/<\/h2>/gi, "\n");
   text = text.replace(/<h3[^>]*>/gi, "\n### ").replace(/<\/h3>/gi, "\n");
   text = text.replace(/<h[456][^>]*>/gi, "\n#### ").replace(/<\/h[456]>/gi, "\n");
   // Preserve block structure as blank lines
-  text = text.replace(/<(p|div|section|article|header|footer|main|nav|aside|blockquote)[^>]*>/gi, "\n\n");
+  text = text.replace(/<(p|div|section|article|header|blockquote)[^>]*>/gi, "\n\n");
   text = text.replace(/<br\s*\/?>/gi, "\n");
   // Preserve list items as markdown bullets
   text = text.replace(/<li[^>]*>/gi, "\n- ");
@@ -90,12 +109,15 @@ export async function webSearch(query: string): Promise<SearchResults> {
   const resultPattern =
     /<a[^>]+class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
 
+  const seen = new Set<string>();
   let match: RegExpExecArray | null;
   let count = 0;
   while ((match = resultPattern.exec(html)) !== null && count < SEARCH_RESULTS_LIMIT) {
     const resultUrl = decodeURIComponent(
       match[1]?.replace(/.*uddg=([^&]*).*/, "$1") ?? match[1] ?? ""
     );
+    if (seen.has(resultUrl)) continue;
+    seen.add(resultUrl);
     const title = stripHtml(match[2] ?? "");
     const snippet = stripHtml(match[3] ?? "");
     results.push(`[${count + 1}] ${title}\n    URL: ${resultUrl}\n    ${snippet}`);

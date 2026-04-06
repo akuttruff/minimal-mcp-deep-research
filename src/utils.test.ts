@@ -128,6 +128,60 @@ describe("stripHtml", () => {
   it("normalizes inline whitespace", () => {
     assert.equal(stripHtml("hello   world"), "hello world");
   });
+
+  it("removes <nav> content entirely", () => {
+    assert.equal(stripHtml("<nav><a href='/'>Home</a><a href='/about'>About</a></nav><p>Content</p>"), "Content");
+  });
+
+  it("removes <footer> content entirely", () => {
+    assert.equal(stripHtml("<p>Content</p><footer>Copyright 2026</footer>"), "Content");
+  });
+
+  it("removes <aside> content entirely", () => {
+    assert.equal(stripHtml("<p>Content</p><aside>Related posts</aside>"), "Content");
+  });
+
+  it("extracts <main> content when available", () => {
+    const html = "<header><nav>menu</nav></header><main><p>Main content</p></main><footer>footer</footer>";
+    const result = stripHtml(html);
+    assert.ok(result.includes("Main content"));
+    assert.ok(!result.includes("menu"));
+    assert.ok(!result.includes("footer"));
+  });
+
+  it("processes the full page when no <main> tag exists", () => {
+    const html = "<div><p>First</p></div><div><p>Second</p></div>";
+    const result = stripHtml(html);
+    assert.ok(result.includes("First"));
+    assert.ok(result.includes("Second"));
+  });
+
+  it("converts links to markdown format", () => {
+    assert.ok(stripHtml('<a href="https://example.com">Click here</a>').includes("[Click here](https://example.com)"));
+  });
+
+  it("drops links with no visible text", () => {
+    assert.equal(stripHtml('<a href="https://example.com"><img src="logo.png"></a>').trim(), "");
+  });
+
+  it("preserves <pre><code> as fenced code blocks", () => {
+    const result = stripHtml("<pre><code>const x = 1;</code></pre>");
+    assert.ok(result.includes("```\nconst x = 1;\n```"));
+  });
+
+  it("preserves inline <code> as backtick spans", () => {
+    assert.ok(stripHtml("Use <code>npm install</code> to install").includes("`npm install`"));
+  });
+
+  it("preserves <strong> and <b> as bold markdown", () => {
+    assert.ok(stripHtml("<strong>bold text</strong>").includes("**bold text**"));
+    assert.ok(stripHtml("<b>also bold</b>").includes("**also bold**"));
+  });
+
+  it("preserves <em> and <i> as italic markdown", () => {
+    assert.ok(stripHtml("<em>italic text</em>").includes("*italic text*"));
+    assert.ok(stripHtml("<i>also italic</i>").includes("*also italic*"));
+  });
 });
 
 // --- truncate ---
@@ -299,6 +353,22 @@ describe("webSearch", () => {
     );
     const result = await webSearch("test");
     assert.equal(result.urls.length, SEARCH_RESULTS_LIMIT);
+  });
+
+  it("deduplicates URLs from search results", async () => {
+    mock.method(globalThis, "fetch", async () =>
+      new Response(
+        makeDDGHtml([
+          { url: "https://example.com/same", title: "First", snippet: "S1" },
+          { url: "https://example.com/same", title: "Duplicate", snippet: "S2" },
+          { url: "https://example.com/different", title: "Other", snippet: "S3" },
+        ]),
+        { status: 200, headers: { "content-type": "text/html" } }
+      )
+    );
+    const result = await webSearch("test");
+    assert.equal(result.urls.length, 2);
+    assert.deepEqual(result.urls, ["https://example.com/same", "https://example.com/different"]);
   });
 });
 
