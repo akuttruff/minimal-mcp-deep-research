@@ -1,7 +1,7 @@
 import { describe, it, mock, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { stripHtml, truncate, wrapAsData, fetchPage, webSearch, deepResearch } from "./utils.js";
-import { FETCH_TIMEOUT_MS, MAX_CONTENT_LENGTH, RESEARCH_FETCH_COUNT, SEARCH_RESULTS_LIMIT } from "./constants.js";
+import { stripHtml, truncate, wrapAsData, fetchPage, webSearch, deepResearch, instantAnswer, wikipediaSearch } from "./utils.js";
+import { DUCKDUCKGO_INSTANT_URL, FETCH_TIMEOUT_MS, MAX_CONTENT_LENGTH, MAX_RESEARCH_LENGTH, RESEARCH_FETCH_COUNT, RESEARCH_FETCH_COUNT_MAX, SEARCH_RESULTS_LIMIT } from "./constants.js";
 
 // Builds minimal DuckDuckGo HTML containing the patterns webSearch parses
 const makeDDGHtml = (results: { url: string; title: string; snippet: string }[]) =>
@@ -379,6 +379,20 @@ describe("deepResearch", () => {
     mock.restoreAll();
   });
 
+  const makeInstantResponse = (abstract = "") =>
+    new Response(
+      JSON.stringify({
+        Heading: abstract ? "Test" : "",
+        Abstract: abstract,
+        AbstractSource: abstract ? "Wikipedia" : "",
+        AbstractURL: abstract ? "https://en.wikipedia.org/wiki/Test" : "",
+        Answer: "",
+        Definition: "",
+        RelatedTopics: [],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+
   const makeSearchResponse = (count: number, prefix = "") =>
     new Response(
       makeDDGHtml(
@@ -397,45 +411,63 @@ describe("deepResearch", () => {
       headers: { "content-type": "text/html" },
     });
 
-  it("includes both ## Search Results and ## Page Contents sections", async () => {
-    let searchCount = 0;
-    mock.method(globalThis, "fetch", async (url: string) => {
-      if (searchCount === 0) { searchCount++; return makeSearchResponse(3); }
+  // Routes fetch calls to the right mock response based on URL
+  const makeRouter = (opts: { instantAbstract?: string; searchCount?: number; searchPrefix?: string } = {}) => {
+    const { instantAbstract = "", searchCount = 3, searchPrefix = "" } = opts;
+    let searchesDone = 0;
+    return async (url: string) => {
+      if (url.startsWith(DUCKDUCKGO_INSTANT_URL)) {
+        return makeInstantResponse(instantAbstract);
+      }
+      if (url.includes("html.duckduckgo.com")) {
+        searchesDone++;
+        return makeSearchResponse(searchCount, searchPrefix);
+      }
       return makePageResponse(url);
-    });
+    };
+  };
+
+  it("includes ## Search Results and ## Page Contents sections", async () => {
+    mock.method(globalThis, "fetch", makeRouter());
     const result = await deepResearch(["test query"]);
     assert.ok(result.includes("## Search Results"));
     assert.ok(result.includes("## Page Contents"));
   });
 
+  it("includes an ## Instant Answer section when one is available", async () => {
+    mock.method(globalThis, "fetch", makeRouter({ instantAbstract: "A test abstract." }));
+    const result = await deepResearch(["test query"]);
+    assert.ok(result.includes("## Instant Answer"));
+    assert.ok(result.includes("A test abstract."));
+  });
+
+  it("omits ## Instant Answer when none is available", async () => {
+    mock.method(globalThis, "fetch", makeRouter());
+    const result = await deepResearch(["test query"]);
+    assert.ok(!result.includes("## Instant Answer"));
+  });
+
   it("includes search snippets in the output", async () => {
-    let searchCount = 0;
-    mock.method(globalThis, "fetch", async (url: string) => {
-      if (searchCount === 0) { searchCount++; return makeSearchResponse(3); }
-      return makePageResponse(url);
-    });
+    mock.method(globalThis, "fetch", makeRouter());
     const result = await deepResearch(["test query"]);
     assert.ok(result.includes("Title 1"));
     assert.ok(result.includes("Snippet 1"));
   });
 
   it("fetches at most RESEARCH_FETCH_COUNT pages", async () => {
-    let fetchCount = 0;
+    let pageFetches = 0;
     mock.method(globalThis, "fetch", async (url: string) => {
-      fetchCount++;
-      if (fetchCount === 1) return makeSearchResponse(RESEARCH_FETCH_COUNT + 2);
+      if (url.startsWith(DUCKDUCKGO_INSTANT_URL)) return makeInstantResponse();
+      if (url.includes("html.duckduckgo.com")) return makeSearchResponse(RESEARCH_FETCH_COUNT + 2);
+      pageFetches++;
       return makePageResponse(url);
     });
     await deepResearch(["test query"]);
-    assert.equal(fetchCount - 1, RESEARCH_FETCH_COUNT);
+    assert.equal(pageFetches, RESEARCH_FETCH_COUNT);
   });
 
   it("labels each fetched page with its source URL", async () => {
-    let searchCount = 0;
-    mock.method(globalThis, "fetch", async (url: string) => {
-      if (searchCount === 0) { searchCount++; return makeSearchResponse(3); }
-      return makePageResponse(url);
-    });
+    mock.method(globalThis, "fetch", makeRouter());
     const result = await deepResearch(["test query"]);
     assert.ok(result.includes("### Source: https://example.com/1"));
   });
@@ -443,7 +475,8 @@ describe("deepResearch", () => {
   it("searches all queries in parallel and combines results", async () => {
     let searchCount = 0;
     mock.method(globalThis, "fetch", async (url: string) => {
-      if (searchCount < 2) {
+      if (url.startsWith(DUCKDUCKGO_INSTANT_URL)) return makeInstantResponse();
+      if (url.includes("html.duckduckgo.com")) {
         searchCount++;
         return makeSearchResponse(2, searchCount === 1 ? "a" : "b");
       }
@@ -455,15 +488,286 @@ describe("deepResearch", () => {
   });
 
   it("deduplicates URLs across multiple queries", async () => {
-    let fetchCount = 0;
+    let pageFetches = 0;
     mock.method(globalThis, "fetch", async (url: string) => {
-      fetchCount++;
-      // Both queries return the same URLs
-      if (fetchCount <= 2) return makeSearchResponse(3);
+      if (url.startsWith(DUCKDUCKGO_INSTANT_URL)) return makeInstantResponse();
+      if (url.includes("html.duckduckgo.com")) return makeSearchResponse(3);
+      pageFetches++;
       return makePageResponse(url);
     });
     await deepResearch(["query one", "query two"]);
-    // 2 search fetches + RESEARCH_FETCH_COUNT page fetches (not 2x because of dedup)
-    assert.equal(fetchCount, 2 + RESEARCH_FETCH_COUNT);
+    // Both queries return same URLs, so only RESEARCH_FETCH_COUNT pages fetched
+    assert.equal(pageFetches, RESEARCH_FETCH_COUNT);
+  });
+
+  it("respects a custom fetch_count", async () => {
+    let pageFetches = 0;
+    mock.method(globalThis, "fetch", async (url: string) => {
+      if (url.startsWith(DUCKDUCKGO_INSTANT_URL)) return makeInstantResponse();
+      if (url.includes("html.duckduckgo.com")) return makeSearchResponse(5);
+      pageFetches++;
+      return makePageResponse(url);
+    });
+    await deepResearch(["test query"], 1);
+    assert.equal(pageFetches, 1);
+  });
+
+  it("clamps fetch_count to RESEARCH_FETCH_COUNT_MAX", async () => {
+    let pageFetches = 0;
+    mock.method(globalThis, "fetch", async (url: string) => {
+      if (url.startsWith(DUCKDUCKGO_INSTANT_URL)) return makeInstantResponse();
+      if (url.includes("html.duckduckgo.com")) return makeSearchResponse(RESEARCH_FETCH_COUNT_MAX + 5);
+      pageFetches++;
+      return makePageResponse(url);
+    });
+    await deepResearch(["test query"], RESEARCH_FETCH_COUNT_MAX + 5);
+    assert.equal(pageFetches, RESEARCH_FETCH_COUNT_MAX);
+  });
+
+  it("clamps fetch_count to minimum of 1", async () => {
+    let pageFetches = 0;
+    mock.method(globalThis, "fetch", async (url: string) => {
+      if (url.startsWith(DUCKDUCKGO_INSTANT_URL)) return makeInstantResponse();
+      if (url.includes("html.duckduckgo.com")) return makeSearchResponse(3);
+      pageFetches++;
+      return makePageResponse(url);
+    });
+    await deepResearch(["test query"], 0);
+    assert.equal(pageFetches, 1);
+  });
+
+  it("stops fetching pages when the output budget is exceeded", async () => {
+    const largeContent = "x".repeat(MAX_CONTENT_LENGTH);
+    let pageFetches = 0;
+    mock.method(globalThis, "fetch", async (url: string) => {
+      if (url.startsWith(DUCKDUCKGO_INSTANT_URL)) return makeInstantResponse();
+      if (url.includes("html.duckduckgo.com")) return makeSearchResponse(RESEARCH_FETCH_COUNT_MAX);
+      pageFetches++;
+      return new Response(`<p>${largeContent}</p>`, {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+    });
+    // Request max pages — budget should stop us well before we reach all of them
+    const result = await deepResearch(["test query"], RESEARCH_FETCH_COUNT_MAX);
+    assert.ok(pageFetches < RESEARCH_FETCH_COUNT_MAX);
+    assert.ok(result.includes("output budget"));
+  });
+});
+
+// --- instantAnswer ---
+
+describe("instantAnswer", () => {
+  beforeEach(() => {
+    mock.restoreAll();
+  });
+
+  const makeDdgResponse = (data: object) =>
+    new Response(JSON.stringify(data), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+
+  it("returns the abstract when available", async () => {
+    mock.method(globalThis, "fetch", async () =>
+      makeDdgResponse({
+        Heading: "Python",
+        Abstract: "Python is a high-level programming language.",
+        AbstractSource: "Wikipedia",
+        AbstractURL: "https://en.wikipedia.org/wiki/Python",
+        Answer: "",
+        Definition: "",
+        RelatedTopics: [],
+      })
+    );
+    const result = await instantAnswer("Python");
+    assert.ok(result.includes("Python is a high-level programming language."));
+    assert.ok(result.includes("Wikipedia"));
+  });
+
+  it("returns the answer when abstract is empty", async () => {
+    mock.method(globalThis, "fetch", async () =>
+      makeDdgResponse({
+        Heading: "",
+        Abstract: "",
+        AbstractSource: "",
+        AbstractURL: "",
+        Answer: "42",
+        Definition: "",
+        RelatedTopics: [],
+      })
+    );
+    const result = await instantAnswer("meaning of life");
+    assert.ok(result.includes("42"));
+  });
+
+  it("returns the definition when abstract and answer are empty", async () => {
+    mock.method(globalThis, "fetch", async () =>
+      makeDdgResponse({
+        Heading: "",
+        Abstract: "",
+        AbstractSource: "",
+        AbstractURL: "",
+        Answer: "",
+        Definition: "A definition of the term.",
+        DefinitionSource: "Merriam-Webster",
+        DefinitionURL: "https://merriam-webster.com/",
+        RelatedTopics: [],
+      })
+    );
+    const result = await instantAnswer("some term");
+    assert.ok(result.includes("A definition of the term."));
+    assert.ok(result.includes("Merriam-Webster"));
+  });
+
+  it("includes infobox content when present", async () => {
+    mock.method(globalThis, "fetch", async () =>
+      makeDdgResponse({
+        Heading: "Paris",
+        Abstract: "Capital of France.",
+        AbstractSource: "Wikipedia",
+        AbstractURL: "https://en.wikipedia.org/wiki/Paris",
+        Answer: "",
+        Definition: "",
+        RelatedTopics: [],
+        Infobox: {
+          content: [
+            { label: "Country", value: "France" },
+            { label: "Population", value: "2,161,000" },
+          ],
+        },
+      })
+    );
+    const result = await instantAnswer("Paris");
+    assert.ok(result.includes("**Country**: France"));
+    assert.ok(result.includes("**Population**: 2,161,000"));
+  });
+
+  it("includes related topics when present", async () => {
+    mock.method(globalThis, "fetch", async () =>
+      makeDdgResponse({
+        Heading: "Python",
+        Abstract: "A programming language.",
+        AbstractSource: "Wikipedia",
+        AbstractURL: "https://en.wikipedia.org/wiki/Python",
+        Answer: "",
+        Definition: "",
+        RelatedTopics: [
+          { Text: "Python 3", FirstURL: "https://duckduckgo.com/Python_3" },
+        ],
+      })
+    );
+    const result = await instantAnswer("Python");
+    assert.ok(result.includes("Python 3"));
+  });
+
+  it("returns no-answer message when all fields are empty", async () => {
+    mock.method(globalThis, "fetch", async () =>
+      makeDdgResponse({
+        Heading: "",
+        Abstract: "",
+        AbstractSource: "",
+        AbstractURL: "",
+        Answer: "",
+        Definition: "",
+        RelatedTopics: [],
+      })
+    );
+    const result = await instantAnswer("xyzzy123obscure");
+    assert.equal(result, "No instant answer available for this query.");
+  });
+
+  it("returns an error message on non-ok response", async () => {
+    mock.method(globalThis, "fetch", async () => new Response(null, { status: 503 }));
+    const result = await instantAnswer("test");
+    assert.ok(result.includes("503"));
+  });
+});
+
+// --- wikipediaSearch ---
+
+describe("wikipediaSearch", () => {
+  beforeEach(() => {
+    mock.restoreAll();
+  });
+
+  const makeSearchResponse = (titles: string[]) =>
+    new Response(
+      JSON.stringify({
+        query: {
+          search: titles.map((title, i) => ({ title, snippet: `Snippet ${i}`, pageid: i + 1 })),
+        },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+
+  const makeSummaryResponse = (title: string) =>
+    new Response(
+      JSON.stringify({
+        title,
+        extract: `Extract for ${title}.`,
+        content_urls: { desktop: { page: `https://en.wikipedia.org/wiki/${title}` } },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+
+  it("returns article summaries for matching results", async () => {
+    let searchDone = false;
+    mock.method(globalThis, "fetch", async (url: string) => {
+      if (!searchDone) {
+        searchDone = true;
+        return makeSearchResponse(["Quantum computing"]);
+      }
+      return makeSummaryResponse("Quantum computing");
+    });
+    const result = await wikipediaSearch("quantum computing");
+    assert.ok(result.includes("Quantum computing"));
+    assert.ok(result.includes("Extract for Quantum computing."));
+  });
+
+  it("includes a link to the Wikipedia article", async () => {
+    let searchDone = false;
+    mock.method(globalThis, "fetch", async (url: string) => {
+      if (!searchDone) {
+        searchDone = true;
+        return makeSearchResponse(["Quantum computing"]);
+      }
+      return makeSummaryResponse("Quantum computing");
+    });
+    const result = await wikipediaSearch("quantum computing");
+    assert.ok(result.includes("https://en.wikipedia.org/wiki/Quantum computing"));
+  });
+
+  it("returns a no-results message when search returns empty", async () => {
+    mock.method(globalThis, "fetch", async () =>
+      new Response(
+        JSON.stringify({ query: { search: [] } }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    );
+    const result = await wikipediaSearch("asdfjkl123");
+    assert.equal(result, "No Wikipedia articles found for this query.");
+  });
+
+  it("returns an error message on non-ok search response", async () => {
+    mock.method(globalThis, "fetch", async () => new Response(null, { status: 503 }));
+    const result = await wikipediaSearch("test");
+    assert.ok(result.includes("503"));
+  });
+
+  it("separates multiple articles with a divider", async () => {
+    let searchDone = false;
+    mock.method(globalThis, "fetch", async (url: string) => {
+      if (!searchDone) {
+        searchDone = true;
+        return makeSearchResponse(["Article A", "Article B"]);
+      }
+      const title = (url as string).includes("Article_A") || (url as string).includes("Article%20A")
+        ? "Article A"
+        : "Article B";
+      return makeSummaryResponse(title);
+    });
+    const result = await wikipediaSearch("articles");
+    assert.ok(result.includes("---"));
   });
 });

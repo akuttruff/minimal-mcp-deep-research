@@ -1,10 +1,15 @@
 import {
+  DUCKDUCKGO_INSTANT_URL,
   DUCKDUCKGO_SEARCH_URL,
   FETCH_TIMEOUT_MS,
   MAX_CONTENT_LENGTH,
+  MAX_RESEARCH_LENGTH,
   RESEARCH_FETCH_COUNT,
+  RESEARCH_FETCH_COUNT_MAX,
   SEARCH_RESULTS_LIMIT,
   USER_AGENT,
+  WIKIPEDIA_SEARCH_URL,
+  WIKIPEDIA_SUMMARY_URL,
 } from "./constants.js";
 
 export function stripHtml(html: string): string {
@@ -97,6 +102,7 @@ export async function webSearch(query: string): Promise<SearchResults> {
 
   const response = await fetch(url, {
     headers: { "User-Agent": USER_AGENT },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
 
   if (!response.ok) {
@@ -132,10 +138,154 @@ export async function webSearch(query: string): Promise<SearchResults> {
   return { text: results.join("\n\n"), urls };
 }
 
-export async function deepResearch(queries: string[]): Promise<string> {
-  const searchResults = await Promise.all(queries.map((q) => webSearch(q)));
+export async function instantAnswer(query: string): Promise<string> {
+  const url = `${DUCKDUCKGO_INSTANT_URL}?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
+  const response = await fetch(url, {
+    headers: { "User-Agent": USER_AGENT },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+
+  if (!response.ok) {
+    return `Instant answer lookup failed with status ${response.status}`;
+  }
+
+  interface DdgInstantAnswer {
+    Abstract: string;
+    AbstractSource: string;
+    AbstractURL: string;
+    Heading: string;
+    Answer: string;
+    Definition: string;
+    DefinitionSource: string;
+    DefinitionURL: string;
+    RelatedTopics: Array<{ Text?: string; FirstURL?: string }>;
+    Infobox?: { content: Array<{ label: string; value: string }> };
+  }
+
+  const data = (await response.json()) as DdgInstantAnswer;
+
+  const parts: string[] = [];
+
+  if (data.Heading) parts.push(`## ${data.Heading}`);
+
+  if (data.Abstract) {
+    parts.push(data.Abstract);
+    if (data.AbstractSource && data.AbstractURL) {
+      parts.push(`Source: [${data.AbstractSource}](${data.AbstractURL})`);
+    }
+  } else if (data.Answer) {
+    parts.push(data.Answer);
+  } else if (data.Definition) {
+    parts.push(data.Definition);
+    if (data.DefinitionSource && data.DefinitionURL) {
+      parts.push(`Source: [${data.DefinitionSource}](${data.DefinitionURL})`);
+    }
+  }
+
+  if (data.Infobox?.content?.length) {
+    const infoLines = data.Infobox.content
+      .slice(0, 10)
+      .map(({ label, value }) => `- **${label}**: ${value}`);
+    parts.push("\n### Details\n" + infoLines.join("\n"));
+  }
+
+  const relatedTopics = data.RelatedTopics
+    ?.filter((t) => t.Text && t.FirstURL)
+    .slice(0, 5)
+    .map((t) => `- [${t.Text}](${t.FirstURL})`);
+  if (relatedTopics?.length) {
+    parts.push("\n### Related Topics\n" + relatedTopics.join("\n"));
+  }
+
+  if (parts.length === 0) {
+    return "No instant answer available for this query.";
+  }
+
+  return truncate(parts.join("\n\n"));
+}
+
+interface WikipediaSearchResult {
+  title: string;
+  snippet: string;
+  pageid: number;
+}
+
+interface WikipediaSearchResponse {
+  query: {
+    search: WikipediaSearchResult[];
+  };
+}
+
+interface WikipediaSummaryResponse {
+  title: string;
+  extract: string;
+  content_urls?: { desktop?: { page?: string } };
+}
+
+export async function wikipediaSearch(query: string): Promise<string> {
+  const searchUrl =
+    `${WIKIPEDIA_SEARCH_URL}?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&srlimit=5&origin=*`;
+
+  const searchResponse = await fetch(searchUrl, {
+    headers: { "User-Agent": USER_AGENT },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+
+  if (!searchResponse.ok) {
+    return `Wikipedia search failed with status ${searchResponse.status}`;
+  }
+
+  const searchData = (await searchResponse.json()) as WikipediaSearchResponse;
+  const results = searchData.query?.search ?? [];
+
+  if (results.length === 0) {
+    return "No Wikipedia articles found for this query.";
+  }
+
+  const summaries = await Promise.all(
+    results.map(async ({ title }) => {
+      try {
+        const summaryUrl = `${WIKIPEDIA_SUMMARY_URL}/${encodeURIComponent(title)}`;
+        const summaryResponse = await fetch(summaryUrl, {
+          headers: { "User-Agent": USER_AGENT },
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        });
+        if (!summaryResponse.ok) return null;
+        const summary = (await summaryResponse.json()) as WikipediaSummaryResponse;
+        const pageUrl = summary.content_urls?.desktop?.page ?? `https://en.wikipedia.org/wiki/${encodeURIComponent(title)}`;
+        return `### [${summary.title}](${pageUrl})\n\n${summary.extract}`;
+      } catch {
+        return null;
+      }
+    })
+  );
+
+  const output = summaries.filter(Boolean).join("\n\n---\n\n");
+  return truncate(output || "No Wikipedia summaries could be retrieved.");
+}
+
+export async function deepResearch(queries: string[], fetchCount?: number): Promise<string> {
+  const resolvedFetchCount = Math.min(
+    Math.max(1, fetchCount ?? RESEARCH_FETCH_COUNT),
+    RESEARCH_FETCH_COUNT_MAX
+  );
+
+  // Run instant answer and web searches in parallel for multi-source coverage
+  const [iaResult, ...searchResults] = await Promise.all([
+    instantAnswer(queries[0] ?? "").catch(() => ""),
+    ...queries.map((q) => webSearch(q)),
+  ]);
+
+  const sections: string[] = [];
+
+  // Include instant answer if one was found
+  if (iaResult && iaResult !== "No instant answer available for this query.") {
+    sections.push("## Instant Answer\n\n" + iaResult);
+  }
 
   const allText = searchResults.map((r) => r.text).join("\n\n");
+  sections.push("## Search Results\n\n" + allText);
+
   const seen = new Set<string>();
   const uniqueUrls = searchResults
     .flatMap((r) => r.urls)
@@ -145,19 +295,23 @@ export async function deepResearch(queries: string[]): Promise<string> {
       return true;
     });
 
-  const pages = await Promise.all(
-    uniqueUrls.slice(0, RESEARCH_FETCH_COUNT).map(async (url) => {
-      const content = await fetchPage(url);
-      return `### Source: ${url}\n\n${content}`;
-    })
-  );
+  // Fetch pages sequentially to enforce a total output budget
+  const pages: string[] = [];
+  let totalLength = sections.join("\n\n").length;
+  for (const url of uniqueUrls.slice(0, resolvedFetchCount)) {
+    const content = await fetchPage(url);
+    const page = `### Source: ${url}\n\n${content}`;
+    if (totalLength + page.length > MAX_RESEARCH_LENGTH && pages.length > 0) {
+      pages.push(`\n\n[Stopped fetching — output budget of ${MAX_RESEARCH_LENGTH.toLocaleString()} characters reached]`);
+      break;
+    }
+    pages.push(page);
+    totalLength += page.length;
+  }
 
-  return [
-    "## Search Results\n",
-    allText,
-    "\n## Page Contents\n",
-    pages.join("\n\n---\n\n"),
-  ].join("\n");
+  sections.push("## Page Contents\n\n" + pages.join("\n\n---\n\n"));
+
+  return sections.join("\n\n");
 }
 
 export async function fetchPage(url: string): Promise<string> {
