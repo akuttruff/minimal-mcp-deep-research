@@ -60,7 +60,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       const result = await instantAnswer(query);
       return {
-        content: [{ type: "text" as const, text: wrapAsData("instant_answer", result) }],
+        content: [{ type: "text" as const, text: wrapAsData("instant_answer", result || "No instant answer available for this query.") }],
       };
     }
 

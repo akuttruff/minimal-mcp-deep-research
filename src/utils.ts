@@ -140,13 +140,22 @@ export async function webSearch(query: string): Promise<SearchResults> {
 
 export async function instantAnswer(query: string): Promise<string> {
   const url = `${DUCKDUCKGO_INSTANT_URL}?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
-  const response = await fetch(url, {
-    headers: { "User-Agent": USER_AGENT },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: { "User-Agent": USER_AGENT },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+  } catch (error) {
+    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+      return "";
+    }
+    return "";
+  }
 
   if (!response.ok) {
-    return `Instant answer lookup failed with status ${response.status}`;
+    return "";
   }
 
   interface DdgInstantAnswer {
@@ -198,7 +207,7 @@ export async function instantAnswer(query: string): Promise<string> {
   }
 
   if (parts.length === 0) {
-    return "No instant answer available for this query.";
+    return "";
   }
 
   return truncate(parts.join("\n\n"));
@@ -226,17 +235,23 @@ export async function wikipediaSearch(query: string): Promise<string> {
   const searchUrl =
     `${WIKIPEDIA_SEARCH_URL}?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&srlimit=5&origin=*`;
 
-  const searchResponse = await fetch(searchUrl, {
-    headers: { "User-Agent": USER_AGENT },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-
-  if (!searchResponse.ok) {
-    return `Wikipedia search failed with status ${searchResponse.status}`;
+  let results: WikipediaSearchResult[];
+  try {
+    const searchResponse = await fetch(searchUrl, {
+      headers: { "User-Agent": USER_AGENT },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (!searchResponse.ok) {
+      return `Wikipedia search failed with status ${searchResponse.status}`;
+    }
+    const searchData = (await searchResponse.json()) as WikipediaSearchResponse;
+    results = searchData.query?.search ?? [];
+  } catch (error) {
+    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+      return `Wikipedia search request timed out after ${FETCH_TIMEOUT_MS / 1_000} seconds.`;
+    }
+    return `Wikipedia search failed: ${error instanceof Error ? error.message : String(error)}`;
   }
-
-  const searchData = (await searchResponse.json()) as WikipediaSearchResponse;
-  const results = searchData.query?.search ?? [];
 
   if (results.length === 0) {
     return "No Wikipedia articles found for this query.";
@@ -278,8 +293,8 @@ export async function deepResearch(queries: string[], fetchCount?: number): Prom
 
   const sections: string[] = [];
 
-  // Include instant answer if one was found
-  if (iaResult && iaResult !== "No instant answer available for this query.") {
+  // Include instant answer if one was found (empty string means unavailable or error)
+  if (iaResult) {
     sections.push("## Instant Answer\n\n" + iaResult);
   }
 
@@ -301,8 +316,8 @@ export async function deepResearch(queries: string[], fetchCount?: number): Prom
   for (const url of uniqueUrls.slice(0, resolvedFetchCount)) {
     const content = await fetchPage(url);
     const page = `### Source: ${url}\n\n${content}`;
-    if (totalLength + page.length > MAX_RESEARCH_LENGTH && pages.length > 0) {
-      pages.push(`\n\n[Stopped fetching — output budget of ${MAX_RESEARCH_LENGTH.toLocaleString()} characters reached]`);
+    if (totalLength + page.length > MAX_RESEARCH_LENGTH) {
+      pages.push(`[Stopped fetching — output budget of ${MAX_RESEARCH_LENGTH.toLocaleString()} characters reached]`);
       break;
     }
     pages.push(page);
@@ -311,7 +326,12 @@ export async function deepResearch(queries: string[], fetchCount?: number): Prom
 
   sections.push("## Page Contents\n\n" + pages.join("\n\n---\n\n"));
 
-  return sections.join("\n\n");
+  // Hard cap: truncate the final assembled output as a safety net
+  const result = sections.join("\n\n");
+  if (result.length > MAX_RESEARCH_LENGTH) {
+    return result.slice(0, MAX_RESEARCH_LENGTH) + `\n\n[Research output truncated at ${MAX_RESEARCH_LENGTH.toLocaleString()} characters]`;
+  }
+  return result;
 }
 
 export async function fetchPage(url: string): Promise<string> {

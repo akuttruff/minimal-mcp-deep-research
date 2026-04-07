@@ -661,7 +661,7 @@ describe("instantAnswer", () => {
     assert.ok(result.includes("Python 3"));
   });
 
-  it("returns no-answer message when all fields are empty", async () => {
+  it("returns empty string when all fields are empty", async () => {
     mock.method(globalThis, "fetch", async () =>
       makeDdgResponse({
         Heading: "",
@@ -674,13 +674,29 @@ describe("instantAnswer", () => {
       })
     );
     const result = await instantAnswer("xyzzy123obscure");
-    assert.equal(result, "No instant answer available for this query.");
+    assert.equal(result, "");
   });
 
-  it("returns an error message on non-ok response", async () => {
+  it("returns empty string on non-ok response", async () => {
     mock.method(globalThis, "fetch", async () => new Response(null, { status: 503 }));
     const result = await instantAnswer("test");
-    assert.ok(result.includes("503"));
+    assert.equal(result, "");
+  });
+
+  it("returns empty string on network error", async () => {
+    mock.method(globalThis, "fetch", async () => { throw new Error("network failure"); });
+    const result = await instantAnswer("test");
+    assert.equal(result, "");
+  });
+
+  it("returns empty string on timeout", async () => {
+    mock.method(globalThis, "fetch", async () => {
+      const error = new Error("timed out");
+      error.name = "TimeoutError";
+      throw error;
+    });
+    const result = await instantAnswer("test");
+    assert.equal(result, "");
   });
 });
 
@@ -706,7 +722,7 @@ describe("wikipediaSearch", () => {
       JSON.stringify({
         title,
         extract: `Extract for ${title}.`,
-        content_urls: { desktop: { page: `https://en.wikipedia.org/wiki/${title}` } },
+        content_urls: { desktop: { page: `https://en.wikipedia.org/wiki/${encodeURIComponent(title)}` } },
       }),
       { status: 200, headers: { "content-type": "application/json" } }
     );
@@ -735,7 +751,7 @@ describe("wikipediaSearch", () => {
       return makeSummaryResponse("Quantum computing");
     });
     const result = await wikipediaSearch("quantum computing");
-    assert.ok(result.includes("https://en.wikipedia.org/wiki/Quantum computing"));
+    assert.ok(result.includes("https://en.wikipedia.org/wiki/Quantum%20computing"));
   });
 
   it("returns a no-results message when search returns empty", async () => {
@@ -753,6 +769,16 @@ describe("wikipediaSearch", () => {
     mock.method(globalThis, "fetch", async () => new Response(null, { status: 503 }));
     const result = await wikipediaSearch("test");
     assert.ok(result.includes("503"));
+  });
+
+  it("returns a timeout error when the search request times out", async () => {
+    mock.method(globalThis, "fetch", async () => {
+      const error = new Error("timed out");
+      error.name = "TimeoutError";
+      throw error;
+    });
+    const result = await wikipediaSearch("test");
+    assert.ok(result.includes("timed out"));
   });
 
   it("separates multiple articles with a divider", async () => {

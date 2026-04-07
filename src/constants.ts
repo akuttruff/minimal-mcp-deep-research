@@ -83,8 +83,12 @@ export const TOOLS = [
           type: "string",
           description: "Query to look up",
         },
+        queries: {
+          type: "array",
+          items: { type: "string" },
+          description: "Alternative to query — if provided, the first query is used.",
+        },
       },
-      required: ["query"],
     },
   },
   {
