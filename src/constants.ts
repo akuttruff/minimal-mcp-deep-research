@@ -44,7 +44,7 @@ export const TOOLS = [
         },
         fetch_count: {
           type: "number",
-          description: `Number of pages to fetch and read (1–10, default 3). Higher values give more depth but take longer.`,
+          description: `Number of pages to fetch and read (1–${RESEARCH_FETCH_COUNT_MAX}, default ${RESEARCH_FETCH_COUNT}). Higher values give more depth but take longer.`,
         },
       },
     },
@@ -105,8 +105,12 @@ export const TOOLS = [
           type: "string",
           description: "Search query",
         },
+        queries: {
+          type: "array",
+          items: { type: "string" },
+          description: "Alternative to query — if provided, the first query is used.",
+        },
       },
-      required: ["query"],
     },
   },
   {

@@ -1,6 +1,6 @@
 # minimal-mcp-deep-research
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server in TypeScript that gives local LLMs deep web research capabilities — search the web, automatically read the most relevant pages in parallel, and gather enough material to synthesize a real answer. Built with [OWASP security for LLM applications](https://owasp.org/www-project-top-10-for-large-language-model-applications/) as a first priority. Uses [DuckDuckGo](https://duckduckgo.com) for search and [Wikipedia](https://en.wikipedia.org/wiki/Special:Statistics) for encyclopedic knowledge, built for [LM Studio](https://lmstudio.ai), no API keys required.
+An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server in TypeScript that gives local LLMs deep web research capabilities — search the web, automatically read the most relevant pages, and gather enough material to synthesize a real answer. Built with [OWASP security for LLM applications](https://owasp.org/www-project-top-10-for-large-language-model-applications/) as a first priority. Uses [DuckDuckGo](https://duckduckgo.com) for search and [Wikipedia](https://en.wikipedia.org/wiki/Special:Statistics) for encyclopedic knowledge, built for [LM Studio](https://lmstudio.ai), no API keys required.
 
 Forked from [`minimal-mcp-web-search`](https://github.com/akuttruff/minimal-mcp-web-search), which provides basic web access through single-query search and page fetching. A single search and a handful of snippets isn't enough for questions that need real investigation — this project adds a `research` tool designed to mimic how a model like Claude approaches a research task.
 
@@ -8,7 +8,7 @@ Forked from [`minimal-mcp-web-search`](https://github.com/akuttruff/minimal-mcp-
 
 **`research`** — The primary tool and default choice for complex questions. Accepts multiple search queries, runs them all in parallel alongside an instant answer lookup, deduplicates the results, and automatically fetches the top pages. Returns an instant answer (when available), search snippets, and full page contents organized by source — multi-source coverage in a single call. Accepts an optional `fetch_count` (1–10, default 3) to trade off depth vs speed. Output is capped at 50,000 characters to avoid overwhelming model context windows.
 
-**`instant_answer`** — Direct factual answers from DuckDuckGo's Instant Answer API, sourced from Wikipedia and other knowledge bases. Best for definitions, people, places, and "what is X" queries. Returns nothing when no answer is available or on network errors — fall back to `research` in that case.
+**`instant_answer`** — Direct factual answers from DuckDuckGo's Instant Answer API, sourced from Wikipedia and other knowledge bases. Best for definitions, people, places, and "what is X" queries. Returns `"No instant answer available for this query."` when no answer is found or on network errors — fall back to `research` in that case.
 
 **`wikipedia_search`** — Searches Wikipedia and returns article summaries with links. Best for encyclopedic topics, historical events, scientific concepts, and notable people or places. Complements `web_search` with authoritative structured knowledge.
 

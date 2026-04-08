@@ -100,10 +100,16 @@ export interface SearchResults {
 export async function webSearch(query: string): Promise<SearchResults> {
   const url = `${DUCKDUCKGO_SEARCH_URL}?q=${encodeURIComponent(query)}`;
 
-  const response = await fetch(url, {
-    headers: { "User-Agent": USER_AGENT },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: { "User-Agent": USER_AGENT },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { text: `Search failed: ${message}`, urls: [] };
+  }
 
   if (!response.ok) {
     return { text: `Search failed with status ${response.status}`, urls: [] };
@@ -171,46 +177,50 @@ export async function instantAnswer(query: string): Promise<string> {
     Infobox?: { content: Array<{ label: string; value: string }> };
   }
 
-  const data = (await response.json()) as DdgInstantAnswer;
+  try {
+    const data = (await response.json()) as DdgInstantAnswer;
 
-  const parts: string[] = [];
+    const parts: string[] = [];
 
-  if (data.Heading) parts.push(`## ${data.Heading}`);
+    if (data.Heading) parts.push(`## ${data.Heading}`);
 
-  if (data.Abstract) {
-    parts.push(data.Abstract);
-    if (data.AbstractSource && data.AbstractURL) {
-      parts.push(`Source: [${data.AbstractSource}](${data.AbstractURL})`);
+    if (data.Abstract) {
+      parts.push(data.Abstract);
+      if (data.AbstractSource && data.AbstractURL) {
+        parts.push(`Source: [${data.AbstractSource}](${data.AbstractURL})`);
+      }
+    } else if (data.Answer) {
+      parts.push(data.Answer);
+    } else if (data.Definition) {
+      parts.push(data.Definition);
+      if (data.DefinitionSource && data.DefinitionURL) {
+        parts.push(`Source: [${data.DefinitionSource}](${data.DefinitionURL})`);
+      }
     }
-  } else if (data.Answer) {
-    parts.push(data.Answer);
-  } else if (data.Definition) {
-    parts.push(data.Definition);
-    if (data.DefinitionSource && data.DefinitionURL) {
-      parts.push(`Source: [${data.DefinitionSource}](${data.DefinitionURL})`);
+
+    if (data.Infobox?.content?.length) {
+      const infoLines = data.Infobox.content
+        .slice(0, 10)
+        .map(({ label, value }) => `- **${label}**: ${value}`);
+      parts.push("\n### Details\n" + infoLines.join("\n"));
     }
-  }
 
-  if (data.Infobox?.content?.length) {
-    const infoLines = data.Infobox.content
-      .slice(0, 10)
-      .map(({ label, value }) => `- **${label}**: ${value}`);
-    parts.push("\n### Details\n" + infoLines.join("\n"));
-  }
+    const relatedTopics = data.RelatedTopics
+      ?.filter((t) => t.Text && t.FirstURL)
+      .slice(0, 5)
+      .map((t) => `- [${t.Text}](${t.FirstURL})`);
+    if (relatedTopics?.length) {
+      parts.push("\n### Related Topics\n" + relatedTopics.join("\n"));
+    }
 
-  const relatedTopics = data.RelatedTopics
-    ?.filter((t) => t.Text && t.FirstURL)
-    .slice(0, 5)
-    .map((t) => `- [${t.Text}](${t.FirstURL})`);
-  if (relatedTopics?.length) {
-    parts.push("\n### Related Topics\n" + relatedTopics.join("\n"));
-  }
+    if (parts.length === 0) {
+      return "";
+    }
 
-  if (parts.length === 0) {
+    return truncate(parts.join("\n\n"));
+  } catch {
     return "";
   }
-
-  return truncate(parts.join("\n\n"));
 }
 
 interface WikipediaSearchResult {
@@ -280,10 +290,8 @@ export async function wikipediaSearch(query: string): Promise<string> {
 }
 
 export async function deepResearch(queries: string[], fetchCount?: number): Promise<string> {
-  const resolvedFetchCount = Math.min(
-    Math.max(1, fetchCount ?? RESEARCH_FETCH_COUNT),
-    RESEARCH_FETCH_COUNT_MAX
-  );
+  const normalizedFetchCount = Number.isFinite(fetchCount) ? Math.floor(fetchCount!) : RESEARCH_FETCH_COUNT;
+  const resolvedFetchCount = Math.min(Math.max(1, normalizedFetchCount), RESEARCH_FETCH_COUNT_MAX);
 
   // Run instant answer and web searches in parallel for multi-source coverage
   const [iaResult, ...searchResults] = await Promise.all([
@@ -310,26 +318,31 @@ export async function deepResearch(queries: string[], fetchCount?: number): Prom
       return true;
     });
 
-  // Fetch pages sequentially to enforce a total output budget
+  // Fetch pages sequentially to enforce a total output budget.
+  // Account for the "## Page Contents" header, separators, and join overhead upfront.
+  const PAGE_CONTENTS_HEADER = "## Page Contents\n\n";
+  const PAGE_SEPARATOR = "\n\n---\n\n";
   const pages: string[] = [];
-  let totalLength = sections.join("\n\n").length;
+  let totalLength = sections.join("\n\n").length + "\n\n".length + PAGE_CONTENTS_HEADER.length;
   for (const url of uniqueUrls.slice(0, resolvedFetchCount)) {
     const content = await fetchPage(url);
     const page = `### Source: ${url}\n\n${content}`;
-    if (totalLength + page.length > MAX_RESEARCH_LENGTH) {
+    const separatorCost = pages.length > 0 ? PAGE_SEPARATOR.length : 0;
+    if (totalLength + separatorCost + page.length > MAX_RESEARCH_LENGTH) {
       pages.push(`[Stopped fetching — output budget of ${MAX_RESEARCH_LENGTH.toLocaleString()} characters reached]`);
       break;
     }
     pages.push(page);
-    totalLength += page.length;
+    totalLength += separatorCost + page.length;
   }
 
-  sections.push("## Page Contents\n\n" + pages.join("\n\n---\n\n"));
+  sections.push(PAGE_CONTENTS_HEADER + pages.join(PAGE_SEPARATOR));
 
-  // Hard cap: truncate the final assembled output as a safety net
+  // Hard cap: strict truncation so the returned string never exceeds MAX_RESEARCH_LENGTH
   const result = sections.join("\n\n");
   if (result.length > MAX_RESEARCH_LENGTH) {
-    return result.slice(0, MAX_RESEARCH_LENGTH) + `\n\n[Research output truncated at ${MAX_RESEARCH_LENGTH.toLocaleString()} characters]`;
+    const notice = `\n\n[Research output truncated at ${MAX_RESEARCH_LENGTH.toLocaleString()} characters]`;
+    return result.slice(0, MAX_RESEARCH_LENGTH - notice.length) + notice;
   }
   return result;
 }

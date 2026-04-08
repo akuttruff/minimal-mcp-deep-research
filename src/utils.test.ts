@@ -1,7 +1,7 @@
 import { describe, it, mock, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { stripHtml, truncate, wrapAsData, fetchPage, webSearch, deepResearch, instantAnswer, wikipediaSearch } from "./utils.js";
-import { DUCKDUCKGO_INSTANT_URL, FETCH_TIMEOUT_MS, MAX_CONTENT_LENGTH, MAX_RESEARCH_LENGTH, RESEARCH_FETCH_COUNT, RESEARCH_FETCH_COUNT_MAX, SEARCH_RESULTS_LIMIT } from "./constants.js";
+import { DUCKDUCKGO_INSTANT_URL, MAX_CONTENT_LENGTH, MAX_RESEARCH_LENGTH, RESEARCH_FETCH_COUNT, RESEARCH_FETCH_COUNT_MAX, SEARCH_RESULTS_LIMIT } from "./constants.js";
 
 // Builds minimal DuckDuckGo HTML containing the patterns webSearch parses
 const makeDDGHtml = (results: { url: string; title: string; snippet: string }[]) =>
@@ -370,6 +370,24 @@ describe("webSearch", () => {
     assert.equal(result.urls.length, 2);
     assert.deepEqual(result.urls, ["https://example.com/same", "https://example.com/different"]);
   });
+
+  it("returns error text and empty urls on network error", async () => {
+    mock.method(globalThis, "fetch", async () => { throw new Error("network failure"); });
+    const result = await webSearch("test");
+    assert.ok(result.text.includes("network failure"));
+    assert.deepEqual(result.urls, []);
+  });
+
+  it("returns error text and empty urls on timeout", async () => {
+    mock.method(globalThis, "fetch", async () => {
+      const error = new Error("timed out");
+      error.name = "TimeoutError";
+      throw error;
+    });
+    const result = await webSearch("test");
+    assert.ok(result.text.includes("Search failed"));
+    assert.deepEqual(result.urls, []);
+  });
 });
 
 // --- deepResearch ---
@@ -695,6 +713,14 @@ describe("instantAnswer", () => {
       error.name = "TimeoutError";
       throw error;
     });
+    const result = await instantAnswer("test");
+    assert.equal(result, "");
+  });
+
+  it("returns empty string on malformed JSON response", async () => {
+    mock.method(globalThis, "fetch", async () =>
+      new Response("not json", { status: 200, headers: { "content-type": "text/html" } })
+    );
     const result = await instantAnswer("test");
     assert.equal(result, "");
   });
