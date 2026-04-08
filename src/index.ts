@@ -4,7 +4,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { deepResearch, fetchPage, webSearch, wrapAsData } from "./utils.js";
+import { deepResearch, fetchPage, instantAnswer, webSearch, wikipediaSearch, wrapAsData } from "./utils.js";
 import { SERVER_NAME, SERVER_VERSION, TOOLS } from "./constants.js";
 
 // --- Server setup ---
@@ -36,15 +36,63 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           isError: true,
         };
       }
-      const result = await deepResearch(queries);
+      const rawFetchCount = (args as Record<string, unknown>)?.fetch_count;
+      const fetchCount = typeof rawFetchCount === "number" ? rawFetchCount : undefined;
+      const result = await deepResearch(queries, fetchCount);
       return {
         content: [{ type: "text" as const, text: wrapAsData("research", result) }],
       };
     }
 
+    case "instant_answer": {
+      const rawQ = (args as Record<string, unknown>)?.query;
+      const rawQs = (args as Record<string, unknown>)?.queries;
+      const query = typeof rawQ === "string" && rawQ.trim() !== ""
+        ? rawQ
+        : Array.isArray(rawQs) && typeof rawQs[0] === "string" && rawQs[0].trim() !== ""
+          ? rawQs[0]
+          : "";
+      if (!query) {
+        return {
+          content: [{ type: "text" as const, text: "Missing or empty 'query' parameter." }],
+          isError: true,
+        };
+      }
+      const result = await instantAnswer(query);
+      return {
+        content: [{ type: "text" as const, text: wrapAsData("instant_answer", result || "No instant answer available for this query.") }],
+      };
+    }
+
+    case "wikipedia_search": {
+      const rawQ = (args as Record<string, unknown>)?.query;
+      const rawQs = (args as Record<string, unknown>)?.queries;
+      const query = typeof rawQ === "string" && rawQ.trim() !== ""
+        ? rawQ
+        : Array.isArray(rawQs) && typeof rawQs[0] === "string" && rawQs[0].trim() !== ""
+          ? rawQs[0]
+          : "";
+      if (!query) {
+        return {
+          content: [{ type: "text" as const, text: "Missing or empty 'query' parameter." }],
+          isError: true,
+        };
+      }
+      const result = await wikipediaSearch(query);
+      return {
+        content: [{ type: "text" as const, text: wrapAsData("wikipedia_search", result) }],
+      };
+    }
+
     case "web_search": {
-      const query = (args as Record<string, unknown>)?.query;
-      if (typeof query !== "string" || query.trim() === "") {
+      const rawQuery = (args as Record<string, unknown>)?.query;
+      const rawQueries = (args as Record<string, unknown>)?.queries;
+      const query = typeof rawQuery === "string" && rawQuery.trim() !== ""
+        ? rawQuery
+        : Array.isArray(rawQueries) && typeof rawQueries[0] === "string" && rawQueries[0].trim() !== ""
+          ? rawQueries[0]
+          : "";
+      if (!query) {
         return {
           content: [{ type: "text" as const, text: "Missing or empty 'query' parameter." }],
           isError: true,
