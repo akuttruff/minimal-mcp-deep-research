@@ -1,6 +1,6 @@
 import { describe, it, mock, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { stripHtml, truncate, wrapAsData, fetchPage, webSearch, deepResearch, instantAnswer, wikipediaSearch } from "./utils.js";
+import { getCurrentDatetime, stripHtml, truncate, wrapAsData, fetchPage, webSearch, deepResearch, instantAnswer, wikipediaSearch } from "./utils.js";
 import { DUCKDUCKGO_INSTANT_URL, MAX_CONTENT_LENGTH, MAX_RESEARCH_LENGTH, RESEARCH_FETCH_COUNT, RESEARCH_FETCH_COUNT_MAX, SEARCH_RESULTS_LIMIT } from "./constants.js";
 
 // Builds minimal DuckDuckGo HTML containing the patterns webSearch parses
@@ -13,6 +13,18 @@ const makeDDGHtml = (results: { url: string; title: string; snippet: string }[])
         <a class="result__snippet">${snippet}</a>`
     )
     .join("\n");
+
+// --- getCurrentDatetime ---
+
+describe("getCurrentDatetime", () => {
+  it("returns a non-empty string", () => {
+    assert.ok(getCurrentDatetime().length > 0);
+  });
+
+  it("includes the current year", () => {
+    assert.ok(getCurrentDatetime().includes(String(new Date().getFullYear())));
+  });
+});
 
 // --- stripHtml ---
 

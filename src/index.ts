@@ -4,7 +4,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { deepResearch, fetchPage, instantAnswer, webSearch, wikipediaSearch, wrapAsData } from "./utils.js";
+import { getCurrentDatetime, deepResearch, fetchPage, instantAnswer, webSearch, wikipediaSearch, wrapAsData } from "./utils.js";
 import { SERVER_NAME, SERVER_VERSION, TOOLS } from "./constants.js";
 
 // --- Server setup ---
@@ -22,6 +22,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   switch (name) {
+    case "current_datetime": {
+      return {
+        content: [{ type: "text" as const, text: getCurrentDatetime() }],
+      };
+    }
+
     case "research": {
       const rawQueries = (args as Record<string, unknown>)?.queries;
       const rawQuery = (args as Record<string, unknown>)?.query;

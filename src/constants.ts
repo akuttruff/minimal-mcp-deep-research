@@ -24,6 +24,17 @@ export const MAX_RESEARCH_LENGTH = 50_000;
 // Tool definitions
 export const TOOLS = [
   {
+    name: "current_datetime",
+    description:
+      "Returns the current date and time. Call this proactively whenever the user asks about today's date, " +
+      "the current time, or anything time-sensitive (recent events, 'latest', 'current', 'this year', etc.). " +
+      "No parameters needed.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+    },
+  },
+  {
     name: "research",
     description:
       "Deep research on any topic. The most thorough tool available — use it as your default for complex or multi-faceted questions. " +
@@ -73,8 +84,9 @@ export const TOOLS = [
   {
     name: "instant_answer",
     description:
-      "Try this first for any factual lookup: definitions, people, places, concepts, 'what is X'. " +
+      "Best for static encyclopedic facts: definitions, people, places, historical events, concepts, 'what is X'. " +
       "Returns a single direct answer sourced from Wikipedia and other knowledge bases. Fast — no page fetching. " +
+      "Not suitable for real-time or dynamic queries (current date, live prices, recent news) — use web_search or research for those. " +
       "If it returns nothing (obscure or ambiguous topic), follow up with wikipedia_search or research.",
     inputSchema: {
       type: "object" as const,

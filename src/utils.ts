@@ -12,6 +12,20 @@ import {
   WIKIPEDIA_SUMMARY_URL,
 } from "./constants.js";
 
+export function getCurrentDatetime(): string {
+  const now = new Date();
+  return now.toLocaleString("en-US", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZoneName: "short",
+  });
+}
+
 export function stripHtml(html: string): string {
   // Remove <head> entirely (title, meta, inline CSS/JS bleed into text otherwise)
   let text = html.replace(/<head[^>]*>[\s\S]*?<\/head>/gi, "");
