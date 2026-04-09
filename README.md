@@ -6,9 +6,11 @@ Forked from [`minimal-mcp-web-search`](https://github.com/akuttruff/minimal-mcp-
 
 ## Tools
 
+**`current_datetime`** — Returns the current date and time. Models are instructed to call this proactively for any time-sensitive query — today's date, recent events, "latest", "this year", etc. No parameters, no network request, instant.
+
 **`research`** — The primary tool and default choice for complex questions. Accepts multiple search queries, runs them all in parallel alongside an instant answer lookup, deduplicates the results, and automatically fetches the top pages. Returns an instant answer (when available), search snippets, and full page contents organized by source — multi-source coverage in a single call. Accepts an optional `fetch_count` (1–10, default 3) to trade off depth vs speed. Output is capped at 50,000 characters to avoid overwhelming model context windows.
 
-**`instant_answer`** — Direct factual answers from DuckDuckGo's Instant Answer API, sourced from Wikipedia and other knowledge bases. Best for definitions, people, places, and "what is X" queries. Returns `"No instant answer available for this query."` when no answer is found or on network errors — fall back to `research` in that case.
+**`instant_answer`** — Direct factual answers from DuckDuckGo's Instant Answer API, sourced from Wikipedia and other knowledge bases. Best for static encyclopedic facts: definitions, people, places, and "what is X" queries. Not suitable for real-time data like the current date or live prices — use `current_datetime` or `web_search` for those. Returns `"No instant answer available for this query."` when no answer is found or on network errors — fall back to `research` in that case.
 
 **`wikipedia_search`** — Searches Wikipedia and returns article summaries with links. Best for encyclopedic topics, historical events, scientific concepts, and notable people or places. Complements `web_search` with authoritative structured knowledge.
 
@@ -95,7 +97,7 @@ If raw HTML were returned to the model, it could regurgitate script tags, malici
 Agents with write access to external systems can cause unintended damage if manipulated.
 
 **Mitigations:**
-- All five tools are strictly read-only. None can write, delete, or modify anything.
+- All six tools are strictly read-only. None can write, delete, or modify anything.
 - LM Studio displays a confirmation dialog before every tool execution, keeping a human in the loop.
 - Tool descriptions are intentionally narrow to prevent creative misuse by the model.
 
