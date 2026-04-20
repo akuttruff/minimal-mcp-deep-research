@@ -7,6 +7,7 @@ export const USER_AGENT = "MinimalMCP/1.0";
 export const FETCH_TIMEOUT_MS = 10_000;
 
 // Search
+export const TAVILY_API_KEY = process.env.TAVILY_API_KEY ?? "";
 export const DUCKDUCKGO_SEARCH_URL = "https://html.duckduckgo.com/html/";
 export const DUCKDUCKGO_INSTANT_URL = "https://api.duckduckgo.com/";
 export const WIKIPEDIA_SEARCH_URL = "https://en.wikipedia.org/w/api.php";

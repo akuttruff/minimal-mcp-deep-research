@@ -10,7 +10,8 @@
     "test": "tsc && node --test dist/utils.test.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@tavily/core": "^0.6.1"
   },
   "devDependencies": {
     "@types/node": "^25.5.2",

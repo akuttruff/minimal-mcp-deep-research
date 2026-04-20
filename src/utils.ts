@@ -7,6 +7,7 @@ import {
   RESEARCH_FETCH_COUNT,
   RESEARCH_FETCH_COUNT_MAX,
   SEARCH_RESULTS_LIMIT,
+  TAVILY_API_KEY,
   USER_AGENT,
   WIKIPEDIA_SEARCH_URL,
   WIKIPEDIA_SUMMARY_URL,
@@ -111,7 +112,40 @@ export interface SearchResults {
   urls: string[];
 }
 
+export async function tavilySearch(query: string): Promise<SearchResults> {
+  try {
+    const { tavily } = await import("@tavily/core");
+    const client = tavily({ apiKey: TAVILY_API_KEY });
+    const response = await client.search(query, {
+      maxResults: SEARCH_RESULTS_LIMIT,
+      searchDepth: "basic",
+    });
+
+    const results: string[] = [];
+    const urls: string[] = [];
+
+    for (let i = 0; i < response.results.length; i++) {
+      const r = response.results[i]!;
+      results.push(`[${i + 1}] ${r.title}\n    URL: ${r.url}\n    ${r.content}`);
+      urls.push(r.url);
+    }
+
+    if (results.length === 0) {
+      return { text: "No results found.", urls: [] };
+    }
+
+    return { text: results.join("\n\n"), urls };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { text: `Tavily search failed: ${message}`, urls: [] };
+  }
+}
+
 export async function webSearch(query: string): Promise<SearchResults> {
+  if (TAVILY_API_KEY) {
+    return tavilySearch(query);
+  }
+
   const url = `${DUCKDUCKGO_SEARCH_URL}?q=${encodeURIComponent(query)}`;
 
   let response: Response;
