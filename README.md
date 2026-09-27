@@ -8,7 +8,7 @@ Forked from [`minimal-mcp-web-search`](https://github.com/akuttruff/minimal-mcp-
 
 **`current_datetime`** — Returns the current date and time. Models are instructed to call this proactively for any time-sensitive query — today's date, recent events, "latest", "this year", etc. No parameters, no network request, instant.
 
-**`research`** — The primary tool and default choice for complex questions. Accepts multiple search queries, runs them all in parallel alongside an instant answer lookup, deduplicates the results, and automatically fetches the top pages. Returns an instant answer (when available), search snippets, and full page contents organized by source — multi-source coverage in a single call. Accepts an optional `fetch_count` (1–10, default 3) to trade off depth vs speed. Output is capped at 50,000 characters to avoid overwhelming model context windows.
+**`research`** — The primary tool and default choice for complex questions. Accepts multiple search queries, runs them all in parallel alongside an instant answer lookup, and reads the top pages — taking each query's best result in turn, so every angle is covered. Pages are fetched in parallel; bot walls, error pages and near-empty pages are skipped in favour of the next result. Long pages are cut down to the passages that best match the queries rather than just their opening. Returns an instant answer (when available), de-duplicated search snippets grouped by query, the selected passages organized by source, and a list of any skipped sources. Accepts an optional `fetch_count` (1–10, default 3): more pages means broader coverage with shorter excerpts. Output is capped at 50,000 characters to avoid overwhelming model context windows.
 
 **`instant_answer`** — Direct factual answers from DuckDuckGo's Instant Answer API, sourced from Wikipedia and other knowledge bases. Best for static encyclopedic facts: definitions, people, places, and "what is X" queries. Not suitable for real-time data like the current date or live prices — use `current_datetime` or `web_search` for those. Returns `"No instant answer available for this query."` when no answer is found or on network errors — fall back to `research` in that case.
 
@@ -16,7 +16,7 @@ Forked from [`minimal-mcp-web-search`](https://github.com/akuttruff/minimal-mcp-
 
 **`web_search`** — Lightweight search that returns up to 10 result titles, URLs, and snippets without fetching page contents. Useful for surveying results before deciding which pages to read.
 
-**`fetch_page`** — Fetches the full text of a single URL. Returns plain text with HTML stripped, capped at 10,000 characters with a 10-second timeout.
+**`fetch_page`** — Fetches the full text of a single public URL. Returns plain text with HTML stripped, capped at 10,000 characters with a 10-second timeout. Local and private network addresses are refused (see [Security](#llm06--excessive-agency-medium)).
 
 ## Dependencies
 
@@ -71,7 +71,8 @@ Web content fetched by `research` and `fetch_page` can contain hidden instructio
 - Navigation noise (`<nav>`, `<footer>`, `<aside>`) is removed entirely to reduce surface area for hidden payloads.
 - When a `<main>` element exists, only its content is extracted — page chrome is discarded.
 - Remaining content is converted to structured markdown (headings, links, code blocks, bold, italic, lists) rather than raw HTML.
-- Tool results are wrapped in structured delimiters that explicitly label content as data, not instructions:
+- Pages that are really bot checks or access walls ("Checking your browser…") are reported as unavailable rather than passed on as content.
+- Tool results are wrapped in structured delimiters that explicitly label content as data, not instructions. Any of those delimiter tags appearing *inside* fetched content are escaped, so a page can't close the wrapper early and have the rest of its text read as instructions:
 
 ```xml
 <tool_result source="research">
@@ -96,9 +97,12 @@ If raw HTML were returned to the model, it could regurgitate script tags, malici
 
 Agents with write access to external systems can cause unintended damage if manipulated.
 
+A read-only fetch tool still has reach: prompt-injected content could steer the model into fetching `http://127.0.0.1:…` or a router admin page (server-side request forgery), then "fetching" an attacker's URL with what it found in the query string.
+
 **Mitigations:**
-- All six tools are strictly read-only. None can write, delete, or modify anything.
-- LM Studio displays a confirmation dialog before every tool execution, keeping a human in the loop.
+- All six tools are strictly read-only, and each declares `readOnlyHint` (and `openWorldHint` where it reaches the web) so clients know.
+- Page fetches only reach the public internet. Loopback, private (RFC 1918), link-local, CGNAT (incl. Tailscale), multicast and IPv6 local addresses are refused, as are `localhost`, single-label hostnames and `.local`/`.internal`/`.lan`/`.home.arpa` names. Hostnames are resolved and every resulting address is checked, and redirects are followed manually (up to 5) so each hop is checked too. Known limit: `fetch` resolves the host again after the check, so DNS rebinding isn't fully closed without a custom connector.
+- LM Studio's chat window displays a confirmation dialog before every tool execution, keeping a human in the loop. Clients calling LM Studio's REST API with integrations enabled get no such dialog, which is why the network restrictions above are enforced in the server itself.
 - Tool descriptions are intentionally narrow to prevent creative misuse by the model.
 
 ### [LLM10 — Unbounded consumption](https://genai.owasp.org/llmrisk/llm102025-unbounded-consumption/) (MEDIUM)
@@ -110,7 +114,8 @@ The `research` tool fetches multiple pages per call, which increases bandwidth a
 - All fetches enforce a 10-second timeout via `AbortSignal.timeout`.
 - Only `text/*` and `application/json` content types are accepted; binary downloads are rejected.
 - The number of pages fetched per `research` call defaults to 3 and is capped at 10 (`RESEARCH_FETCH_COUNT_MAX`), even when the caller requests more.
-- Total `research` output is capped at 50,000 characters (`MAX_RESEARCH_LENGTH`). Page fetching stops early when this budget is reached, preventing runaway context consumption with high `fetch_count` values.
+- Total `research` output is capped at 50,000 characters (`MAX_RESEARCH_LENGTH`). The pages read share that budget, each trimmed to its most relevant passages, preventing runaway context consumption with high `fetch_count` values.
+- Replacements for skipped pages are bounded: a `research` call attempts at most `2 × fetch_count + 2` page fetches.
 - `instant_answer` and `wikipedia_search` responses are subject to the same 10,000-character cap and 10-second timeout.
 
 ### [LLM03 — Supply chain](https://genai.owasp.org/llmrisk/llm032025-supply-chain/) (LOW)
