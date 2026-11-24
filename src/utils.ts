@@ -232,9 +232,82 @@ export interface SearchResults {
   text: string;
   urls: string[];
   items: SearchItem[];
+  /** DuckDuckGo refused the search with its bot check: no results is not an answer. */
+  blocked?: boolean;
 }
 
+/**
+ * What a search says when DuckDuckGo has answered with its bot check instead
+ * of results. Worded for the model: without it, a challenge page parsed as
+ * "No results found." and the model concluded there was nothing to find, or
+ * that its tools were broken.
+ */
+export const BLOCKED_TEXT =
+  "Search unavailable: DuckDuckGo is asking this machine to prove it is human (too many searches in a short time), " +
+  "so it sent no results. This says nothing about the topic. Searching is paused for a few minutes; until then, " +
+  "answer from what you know and say that the web could not be checked.";
+
+/** DuckDuckGo's bot check: status 202 and a page asking to pick the squares with a duck in them. */
+export function isBotCheck(status: number, html: string): boolean {
+  return status === 202 || /anomaly-modal|challenge-form|bots use DuckDuckGo too/i.test(html);
+}
+
+/**
+ * Searches go out one at a time, a little apart: a burst of them is what
+ * trips DuckDuckGo's bot check. Once it has, searching pauses for a while
+ * rather than asking again (which only prolongs the block), and a query
+ * asked again soon after is answered from the cache.
+ */
+export const SEARCH_PACING = {
+  gapMs: 1_500,
+  cooldownMs: 10 * 60_000,
+  cacheMs: 10 * 60_000,
+};
+
+const searchState = {
+  lastAt: 0,
+  blockedUntil: 0,
+  cache: new Map<string, { at: number; result: SearchResults }>(),
+  chain: Promise.resolve() as Promise<unknown>,
+};
+
+/** Forget the pacing, the pause and the cache (for tests). */
+export function resetSearchState(): void {
+  searchState.lastAt = 0;
+  searchState.blockedUntil = 0;
+  searchState.cache.clear();
+  searchState.chain = Promise.resolve();
+}
+
+/** Run `fn` after every search before it, and at least SEARCH_PACING.gapMs after the last one. */
+function paced<T>(fn: () => Promise<T>): Promise<T> {
+  const run = searchState.chain.then(async () => {
+    const wait = searchState.lastAt + SEARCH_PACING.gapMs - Date.now();
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+    try {
+      return await fn();
+    } finally {
+      searchState.lastAt = Date.now();
+    }
+  });
+  searchState.chain = run.catch(() => undefined);
+  return run;
+}
+
+const blocked = (): SearchResults => ({ text: BLOCKED_TEXT, urls: [], items: [], blocked: true });
+
 export async function webSearch(query: string): Promise<SearchResults> {
+  const key = query.trim().toLowerCase();
+  const cached = searchState.cache.get(key);
+  if (cached && Date.now() - cached.at < SEARCH_PACING.cacheMs) return cached.result;
+  if (Date.now() < searchState.blockedUntil) return blocked();
+  const result = await paced(() => (Date.now() < searchState.blockedUntil ? Promise.resolve(blocked()) : searchOnce(query)));
+  if (result.blocked) searchState.blockedUntil = Math.max(searchState.blockedUntil, Date.now() + SEARCH_PACING.cooldownMs);
+  else if (!result.text.startsWith("Search failed")) searchState.cache.set(key, { at: Date.now(), result });
+  return result;
+}
+
+async function searchOnce(query: string): Promise<SearchResults> {
   const url = `${DUCKDUCKGO_SEARCH_URL}?q=${encodeURIComponent(query)}`;
 
   let response: Response;
@@ -253,6 +326,7 @@ export async function webSearch(query: string): Promise<SearchResults> {
   }
 
   const html = await response.text();
+  if (isBotCheck(response.status, html)) return blocked();
   const results: string[] = [];
   const urls: string[] = [];
   const items: SearchItem[] = [];
@@ -594,13 +668,20 @@ export async function deepResearch(queries: string[], fetchCount?: number): Prom
   const normalizedFetchCount = Number.isFinite(fetchCount) ? Math.floor(fetchCount!) : RESEARCH_FETCH_COUNT;
   const resolvedFetchCount = Math.min(Math.max(1, normalizedFetchCount), RESEARCH_FETCH_COUNT_MAX);
 
-  // Run instant answer and web searches in parallel for multi-source coverage
+  // The instant answer and the searches are asked together; the searches
+  // themselves go out one at a time (see SEARCH_PACING).
   const [iaResult, ...searchResults] = await Promise.all([
     instantAnswer(queries[0] ?? "").catch(() => ""),
     ...queries.map((q) => webSearch(q)),
   ]);
 
   const sections: string[] = [];
+
+  // Blocked: said first and plainly, so the model doesn't read the empty
+  // sections below as the web having nothing on the topic.
+  if (searchResults.some((r) => r.blocked)) {
+    sections.push("## Search unavailable\n\n" + BLOCKED_TEXT);
+  }
 
   // Include instant answer if one was found (empty string means unavailable or error)
   if (iaResult) {
@@ -612,6 +693,7 @@ export async function deepResearch(queries: string[], fetchCount?: number): Prom
   const listed = new Set<string>();
   const snippetGroups = searchResults.map((result, qi) => {
     const heading = `### ${queries[qi]}`;
+    if (result.blocked) return `${heading}\n\n(not searched: see above)`;
     if (result.items.length === 0) return `${heading}\n\n${result.text}`;
     const lines: string[] = [];
     for (const item of result.items) {

@@ -3,8 +3,23 @@ import assert from "node:assert/strict";
 import {
   getCurrentDatetime, stripHtml, truncate, wrapAsData, fetchPage, webSearch, deepResearch, instantAnswer, wikipediaSearch,
   resolver, isPrivateAddress, checkPublicUrl, detectBlockedPage, queryTerms, selectPassages, interleave,
+  BLOCKED_TEXT, SEARCH_PACING, isBotCheck, resetSearchState,
 } from "./utils.js";
 import { DUCKDUCKGO_INSTANT_URL, MAX_CONTENT_LENGTH, MAX_RESEARCH_LENGTH, RESEARCH_FETCH_COUNT, RESEARCH_FETCH_COUNT_MAX, SEARCH_RESULTS_LIMIT } from "./constants.js";
+
+// Each test starts with no cache, no pause and no pacing between searches.
+const PACING = { ...SEARCH_PACING };
+beforeEach(() => {
+  resetSearchState();
+  SEARCH_PACING.gapMs = 0;
+  SEARCH_PACING.cooldownMs = PACING.cooldownMs;
+  SEARCH_PACING.cacheMs = PACING.cacheMs;
+});
+
+/** The page DuckDuckGo sends instead of results when it suspects a bot. */
+const BOT_CHECK_HTML =
+  '<div class="anomaly-modal__mask"><div class="anomaly-modal__modal">Unfortunately, bots use DuckDuckGo too. ' +
+  'Please complete the following challenge</div><form id="challenge-form"></form></div>';
 
 // Builds minimal DuckDuckGo HTML containing the patterns webSearch parses
 const makeDDGHtml = (results: { url: string; title: string; snippet: string }[]) =>
@@ -1046,5 +1061,70 @@ describe("selectPassages", () => {
 describe("interleave", () => {
   it("alternates between lists and drops repeats", () => {
     assert.deepEqual(interleave([["a", "b", "c"], ["d", "a"], ["e"]]), ["a", "d", "e", "b", "c"]);
+  });
+});
+
+describe("DuckDuckGo's bot check", () => {
+  it("is recognised by its status or its page", () => {
+    assert.equal(isBotCheck(202, ""), true);
+    assert.equal(isBotCheck(200, BOT_CHECK_HTML), true);
+    assert.equal(isBotCheck(200, "<html>results</html>"), false);
+  });
+
+  it("is reported as a blocked search, not as no results", async () => {
+    mock.method(globalThis, "fetch", async () => new Response(BOT_CHECK_HTML, { status: 202 }));
+    const result = await webSearch("anything");
+    assert.equal(result.blocked, true);
+    assert.equal(result.text, BLOCKED_TEXT);
+    assert.ok(!result.text.includes("No results found"));
+  });
+
+  it("pauses searching once blocked, instead of asking again", async () => {
+    const calls = mock.method(globalThis, "fetch", async () => new Response(BOT_CHECK_HTML, { status: 202 }));
+    await webSearch("one");
+    await webSearch("two");
+    await webSearch("three");
+    assert.equal(calls.mock.callCount(), 1);
+  });
+
+  it("is said first and plainly in a research result", async () => {
+    mock.method(globalThis, "fetch", async (url: string) =>
+      url.includes("html.duckduckgo.com") ? new Response(BOT_CHECK_HTML, { status: 202 }) : new Response("{}", { status: 200 })
+    );
+    const result = await deepResearch(["first query", "second query"]);
+    assert.ok(result.includes("## Search unavailable"));
+    assert.ok(result.includes(BLOCKED_TEXT));
+    assert.ok(!result.includes("No results found"));
+  });
+});
+
+describe("search pacing and cache", () => {
+  const page = (): Response =>
+    new Response('<a class="result__a" href="https://example.com/a">A</a><a class="result__snippet" href="#">a</a>', { status: 200 });
+
+  it("answers a repeated query from the cache", async () => {
+    const calls = mock.method(globalThis, "fetch", async () => page());
+    await webSearch("Same Query");
+    const again = await webSearch("same query ");
+    assert.equal(calls.mock.callCount(), 1);
+    assert.equal(again.items.length, 1);
+  });
+
+  it("sends searches one at a time, spaced apart", async () => {
+    SEARCH_PACING.gapMs = 40;
+    const at: number[] = [];
+    let inFlight = 0;
+    let most = 0;
+    mock.method(globalThis, "fetch", async () => {
+      inFlight++;
+      most = Math.max(most, inFlight);
+      at.push(Date.now());
+      await new Promise((r) => setTimeout(r, 5));
+      inFlight--;
+      return page();
+    });
+    await Promise.all(["a", "b", "c"].map((q) => webSearch(q)));
+    assert.equal(most, 1);
+    assert.ok(at[1]! - at[0]! >= 35 && at[2]! - at[1]! >= 35, `gaps ${at[1]! - at[0]!}, ${at[2]! - at[1]!}`);
   });
 });
