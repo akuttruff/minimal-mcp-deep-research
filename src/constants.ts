@@ -10,6 +10,7 @@ export const MAX_REDIRECTS = 5;
 // Search
 export const DUCKDUCKGO_SEARCH_URL = "https://html.duckduckgo.com/html/";
 export const DUCKDUCKGO_INSTANT_URL = "https://api.duckduckgo.com/";
+export const TAVILY_SEARCH_URL = "https://api.tavily.com/search";
 export const WIKIPEDIA_SEARCH_URL = "https://en.wikipedia.org/w/api.php";
 export const WIKIPEDIA_SUMMARY_URL = "https://en.wikipedia.org/api/rest_v1/page/summary";
 export const SEARCH_RESULTS_LIMIT = 10;

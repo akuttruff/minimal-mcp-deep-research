@@ -1,6 +1,6 @@
 # minimal-mcp-deep-research
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server in TypeScript that gives local LLMs deep web research capabilities — search the web, automatically read the most relevant pages, and gather enough material to synthesize a real answer. Built with [OWASP security for LLM applications](https://owasp.org/www-project-top-10-for-large-language-model-applications/) as a first priority. Uses [DuckDuckGo](https://duckduckgo.com) for search and [Wikipedia](https://en.wikipedia.org/wiki/Special:Statistics) for encyclopedic knowledge, built for [LM Studio](https://lmstudio.ai), no API keys required.
+An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server in TypeScript that gives local LLMs deep web research capabilities — search the web, automatically read the most relevant pages, and gather enough material to synthesize a real answer. Built with [OWASP security for LLM applications](https://owasp.org/www-project-top-10-for-large-language-model-applications/) as a first priority. Searches through [DuckDuckGo](https://duckduckgo.com) out of the box, or a [SearXNG](https://docs.searxng.org) instance or [Tavily](https://tavily.com) if you set one up (see [Search sources](#search-sources)), and uses [Wikipedia](https://en.wikipedia.org/wiki/Special:Statistics) for encyclopedic knowledge. Built for [LM Studio](https://lmstudio.ai); no API keys required.
 
 Forked from [`minimal-mcp-web-search`](https://github.com/akuttruff/minimal-mcp-web-search), which provides basic web access through single-query search and page fetching. A single search and a handful of snippets isn't enough for questions that need real investigation — this project adds a `research` tool designed to mimic how a model like Claude approaches a research task.
 
@@ -8,7 +8,7 @@ Forked from [`minimal-mcp-web-search`](https://github.com/akuttruff/minimal-mcp-
 
 **`current_datetime`** — Returns the current date and time. Models are instructed to call this proactively for any time-sensitive query — today's date, recent events, "latest", "this year", etc. No parameters, no network request, instant.
 
-**`research`** — The primary tool and default choice for complex questions. Accepts multiple search queries, runs them all in parallel alongside an instant answer lookup, and reads the top pages — taking each query's best result in turn, so every angle is covered. Pages are fetched in parallel; bot walls, error pages and near-empty pages are skipped in favour of the next result. Long pages are cut down to the passages that best match the queries rather than just their opening. Returns an instant answer (when available), de-duplicated search snippets grouped by query, the selected passages organized by source, and a list of any skipped sources. Accepts an optional `fetch_count` (1–10, default 3): more pages means broader coverage with shorter excerpts. Output is capped at 50,000 characters to avoid overwhelming model context windows.
+**`research`** — The primary tool and default choice for complex questions. Accepts multiple search queries, searches each in turn (see [Search sources](#search-sources)) alongside an instant answer lookup, and reads the top pages — taking each query's best result in turn, so every angle is covered. Pages are fetched in parallel; bot walls, error pages and near-empty pages are skipped in favour of the next result. Long pages are cut down to the passages that best match the queries rather than just their opening. Returns an instant answer (when available), de-duplicated search snippets grouped by query, the selected passages organized by source, and a list of any skipped sources. Accepts an optional `fetch_count` (1–10, default 3): more pages means broader coverage with shorter excerpts. Output is capped at 50,000 characters to avoid overwhelming model context windows.
 
 **`instant_answer`** — Direct factual answers from DuckDuckGo's Instant Answer API, sourced from Wikipedia and other knowledge bases. Best for static encyclopedic facts: definitions, people, places, and "what is X" queries. Not suitable for real-time data like the current date or live prices — use `current_datetime` or `web_search` for those. Returns `"No instant answer available for this query."` when no answer is found or on network errors — fall back to `research` in that case.
 
@@ -48,6 +48,28 @@ npm run build
 
 4. Save. Toggle on `mcp/deep-research` in the Integrations panel.
 5. Start a new chat and ask something that requires current information.
+
+### Search sources
+
+Searches try each source that is set up, in this order, until one answers:
+
+| Source | Set with | Notes |
+|---|---|---|
+| [SearXNG](https://docs.searxng.org) | `SEARXNG_URL`, e.g. `http://127.0.0.1:8888` | A self-hosted meta-search engine. It asks several engines at once, so one of them refusing doesn't stop a search. Its `settings.yml` must list `json` under `search.formats`. |
+| [Tavily](https://tavily.com) | `TAVILY_API_KEY` | A search API; the free plan gives 1,000 searches a month. |
+| DuckDuckGo | always on, tried last | No key, but it answers a burst of searches with a bot check. |
+
+Set them in the server's `env` in `mcp.json`:
+
+```json
+"deep-research": {
+  "command": "node",
+  "args": ["/absolute/path/to/dist/index.js"],
+  "env": { "SEARXNG_URL": "http://127.0.0.1:8888" }
+}
+```
+
+Searches go out one at a time, at least 1.5 seconds apart, and a query repeated within 10 minutes is answered from a cache. A source that refuses (a bot check, a rate limit, or SearXNG with every engine refusing) is skipped for 10 minutes, and the next source is used meanwhile. Only when every source refuses does a search say so, in words meant for the model: the search was refused, which says nothing about the topic, so answer from what you know and say the web couldn't be checked. A source that is down or errors is skipped for that search only.
 
 ### Test from the command line
 

@@ -3,14 +3,16 @@ import assert from "node:assert/strict";
 import {
   getCurrentDatetime, stripHtml, truncate, wrapAsData, fetchPage, webSearch, deepResearch, instantAnswer, wikipediaSearch,
   resolver, isPrivateAddress, checkPublicUrl, detectBlockedPage, queryTerms, selectPassages, interleave,
-  BLOCKED_TEXT, SEARCH_PACING, isBotCheck, resetSearchState,
+  BLOCKED_TEXT, SEARCH_PACING, isBotCheck, resetSearchState, searchConfig,
 } from "./utils.js";
 import { DUCKDUCKGO_INSTANT_URL, MAX_CONTENT_LENGTH, MAX_RESEARCH_LENGTH, RESEARCH_FETCH_COUNT, RESEARCH_FETCH_COUNT_MAX, SEARCH_RESULTS_LIMIT } from "./constants.js";
 
-// Each test starts with no cache, no pause and no pacing between searches.
+// Each test starts with no cache, no pause, no pacing between searches, and DuckDuckGo as the only source.
 const PACING = { ...SEARCH_PACING };
 beforeEach(() => {
   resetSearchState();
+  searchConfig.searxngUrl = "";
+  searchConfig.tavilyKey = "";
   SEARCH_PACING.gapMs = 0;
   SEARCH_PACING.cooldownMs = PACING.cooldownMs;
   SEARCH_PACING.cacheMs = PACING.cacheMs;
@@ -1126,5 +1128,140 @@ describe("search pacing and cache", () => {
     await Promise.all(["a", "b", "c"].map((q) => webSearch(q)));
     assert.equal(most, 1);
     assert.ok(at[1]! - at[0]! >= 35 && at[2]! - at[1]! >= 35, `gaps ${at[1]! - at[0]!}, ${at[2]! - at[1]!}`);
+  });
+});
+
+describe("search sources", () => {
+  const SEARXNG = "http://127.0.0.1:8888";
+  const json = (body: unknown, status = 200): Response =>
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const ddgPage = (): Response =>
+    new Response(makeDDGHtml([{ url: "https://ddg.example/a", title: "From DDG", snippet: "ddg" }]), { status: 200 });
+
+  beforeEach(() => {
+    mock.restoreAll();
+  });
+
+  it("asks SearXNG first, and reads its JSON results", async () => {
+    searchConfig.searxngUrl = SEARXNG + "/";
+    const urls: string[] = [];
+    mock.method(globalThis, "fetch", async (url: string) => {
+      urls.push(url);
+      return json({
+        results: [
+          { title: "<b>One</b>", url: "https://one.example/", content: "First   result." },
+          { title: "One again", url: "https://one.example/", content: "duplicate" },
+          { title: "Two", url: "https://two.example/", content: "x".repeat(1_000) },
+        ],
+        unresponsive_engines: [],
+      });
+    });
+    const result = await webSearch("a query");
+    assert.equal(urls.length, 1);
+    assert.equal(urls[0], `${SEARXNG}/search?q=a%20query&format=json&categories=general`);
+    assert.deepEqual(result.urls, ["https://one.example/", "https://two.example/"]);
+    assert.equal(result.items[0]!.title, "One");
+    assert.equal(result.items[0]!.snippet, "First result.");
+    assert.ok(result.items[1]!.snippet.length <= 401);
+    assert.ok(result.text.startsWith("[1] One\n    URL: https://one.example/"));
+  });
+
+  it("says no results when SearXNG's engines answered with none", async () => {
+    searchConfig.searxngUrl = SEARXNG;
+    const calls = mock.method(globalThis, "fetch", async () => json({ results: [], unresponsive_engines: [] }));
+    const result = await webSearch("nothing matches this");
+    assert.equal(result.text, "No results found.");
+    assert.equal(calls.mock.callCount(), 1);
+  });
+
+  it("falls back to DuckDuckGo when SearXNG is down", async () => {
+    searchConfig.searxngUrl = SEARXNG;
+    mock.method(globalThis, "fetch", async (url: string) => {
+      if (url.startsWith(SEARXNG)) throw new TypeError("fetch failed", { cause: new Error("connect ECONNREFUSED") });
+      return ddgPage();
+    });
+    const result = await webSearch("q");
+    assert.deepEqual(result.urls, ["https://ddg.example/a"]);
+  });
+
+  it("pauses SearXNG when all its engines refused, and uses the next source meanwhile", async () => {
+    searchConfig.searxngUrl = SEARXNG;
+    const asked: string[] = [];
+    mock.method(globalThis, "fetch", async (url: string) => {
+      asked.push(url.startsWith(SEARXNG) ? "searxng" : "ddg");
+      return url.startsWith(SEARXNG) ? json({ results: [], unresponsive_engines: [["google", "CAPTCHA"]] }) : ddgPage();
+    });
+    assert.deepEqual((await webSearch("first")).urls, ["https://ddg.example/a"]);
+    assert.deepEqual((await webSearch("second")).urls, ["https://ddg.example/a"]);
+    assert.deepEqual(asked, ["searxng", "ddg", "ddg"]);
+  });
+
+  it("is blocked only when every source refused", async () => {
+    searchConfig.searxngUrl = SEARXNG;
+    const calls = mock.method(globalThis, "fetch", async (url: string) =>
+      url.startsWith(SEARXNG) ? new Response("", { status: 429 }) : new Response(BOT_CHECK_HTML, { status: 202 })
+    );
+    const result = await webSearch("q");
+    assert.equal(result.blocked, true);
+    assert.equal(result.text, BLOCKED_TEXT);
+    await webSearch("another");
+    assert.equal(calls.mock.callCount(), 2);
+  });
+
+  it("reports an error, not a block, when SearXNG errors and DuckDuckGo is down", async () => {
+    searchConfig.searxngUrl = SEARXNG;
+    mock.method(globalThis, "fetch", async (url: string) =>
+      url.startsWith(SEARXNG) ? new Response("", { status: 403 }) : new Response("", { status: 500 })
+    );
+    const result = await webSearch("q");
+    assert.equal(result.blocked, undefined);
+    assert.ok(result.text.includes("JSON format"));
+  });
+
+  it("asks Tavily with the key, after SearXNG and before DuckDuckGo", async () => {
+    searchConfig.searxngUrl = SEARXNG;
+    searchConfig.tavilyKey = "tvly-test";
+    const asked: string[] = [];
+    let auth = "";
+    let body: { query?: string } = {};
+    mock.method(globalThis, "fetch", async (url: string, init?: RequestInit) => {
+      if (url.startsWith(SEARXNG)) {
+        asked.push("searxng");
+        return new Response("", { status: 502 });
+      }
+      if (url.includes("api.tavily.com")) {
+        asked.push("tavily");
+        auth = new Headers(init?.headers).get("authorization") ?? "";
+        body = JSON.parse(String(init?.body));
+        return json({ results: [{ title: "T", url: "https://t.example/", content: "tavily says" }] });
+      }
+      asked.push("ddg");
+      return ddgPage();
+    });
+    const result = await webSearch("the question");
+    assert.deepEqual(asked, ["searxng", "tavily"]);
+    assert.equal(auth, "Bearer tvly-test");
+    assert.equal(body.query, "the question");
+    assert.deepEqual(result.urls, ["https://t.example/"]);
+  });
+
+  it("treats Tavily's rate and plan limits as refusals", async () => {
+    searchConfig.tavilyKey = "tvly-test";
+    const asked: string[] = [];
+    mock.method(globalThis, "fetch", async (url: string) => {
+      asked.push(url.includes("api.tavily.com") ? "tavily" : "ddg");
+      return url.includes("api.tavily.com") ? new Response("", { status: 432 }) : ddgPage();
+    });
+    await webSearch("one");
+    await webSearch("two");
+    assert.deepEqual(asked, ["tavily", "ddg", "ddg"]);
+  });
+
+  it("names a refused Tavily key", async () => {
+    searchConfig.tavilyKey = "wrong";
+    mock.method(globalThis, "fetch", async (url: string) =>
+      url.includes("api.tavily.com") ? new Response("", { status: 401 }) : new Response("", { status: 500 })
+    );
+    assert.ok((await webSearch("q")).text.includes("TAVILY_API_KEY"));
   });
 });

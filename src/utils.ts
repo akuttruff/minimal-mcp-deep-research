@@ -12,6 +12,7 @@ import {
   RESEARCH_FETCH_COUNT_MAX,
   RESEARCH_SNIPPETS_PER_QUERY,
   SEARCH_RESULTS_LIMIT,
+  TAVILY_SEARCH_URL,
   USER_AGENT,
   WIKIPEDIA_SEARCH_URL,
   WIKIPEDIA_SUMMARY_URL,
@@ -232,20 +233,38 @@ export interface SearchResults {
   text: string;
   urls: string[];
   items: SearchItem[];
-  /** DuckDuckGo refused the search with its bot check: no results is not an answer. */
+  /** Every search source refused (a bot check, a rate limit): no results is not an answer. */
   blocked?: boolean;
+  /** This source couldn't be asked (down, an error status, a bad key): try the next one. */
+  failed?: boolean;
 }
 
 /**
- * What a search says when DuckDuckGo has answered with its bot check instead
- * of results. Worded for the model: without it, a challenge page parsed as
- * "No results found." and the model concluded there was nothing to find, or
- * that its tools were broken.
+ * What a search says when the sources have refused it (DuckDuckGo's bot
+ * check, a rate limit) instead of answering. Worded for the model: without
+ * it, a challenge page parsed as "No results found." and the model concluded
+ * there was nothing to find, or that its tools were broken.
  */
 export const BLOCKED_TEXT =
-  "Search unavailable: DuckDuckGo is asking this machine to prove it is human (too many searches in a short time), " +
-  "so it sent no results. This says nothing about the topic. Searching is paused for a few minutes; until then, " +
+  "Search unavailable: the search engines are refusing searches from this machine for now (too many in a short time), " +
+  "so there are no results. This says nothing about the topic. Searching is paused for a few minutes; until then, " +
   "answer from what you know and say that the web could not be checked.";
+
+/**
+ * Where searches go, in order; each one that is set is tried until one
+ * answers. Read from the environment (the MCP client's config):
+ *
+ * - SEARXNG_URL: a SearXNG instance with its JSON format turned on, e.g.
+ *   http://127.0.0.1:8888. It asks several engines at once, so one engine
+ *   refusing doesn't stop a search.
+ * - TAVILY_API_KEY: Tavily's search API (a free key gives 1,000 searches a month).
+ * - DuckDuckGo's HTML page, always last: no key, but it answers a burst of
+ *   searches with a bot check.
+ */
+export const searchConfig = {
+  searxngUrl: process.env.SEARXNG_URL?.trim() ?? "",
+  tavilyKey: process.env.TAVILY_API_KEY?.trim() ?? "",
+};
 
 /** DuckDuckGo's bot check: status 202 and a page asking to pick the squares with a duck in them. */
 export function isBotCheck(status: number, html: string): boolean {
@@ -254,9 +273,9 @@ export function isBotCheck(status: number, html: string): boolean {
 
 /**
  * Searches go out one at a time, a little apart: a burst of them is what
- * trips DuckDuckGo's bot check. Once it has, searching pauses for a while
- * rather than asking again (which only prolongs the block), and a query
- * asked again soon after is answered from the cache.
+ * trips a search engine's bot check. A source that has refused is left
+ * alone for a while rather than asked again (which only prolongs the
+ * block), and a query asked again soon after is answered from the cache.
  */
 export const SEARCH_PACING = {
   gapMs: 1_500,
@@ -266,18 +285,35 @@ export const SEARCH_PACING = {
 
 const searchState = {
   lastAt: 0,
-  blockedUntil: 0,
+  /** Per source: refused until this time. */
+  blockedUntil: new Map<string, number>(),
   cache: new Map<string, { at: number; result: SearchResults }>(),
   chain: Promise.resolve() as Promise<unknown>,
 };
 
-/** Forget the pacing, the pause and the cache (for tests). */
+/** Forget the pacing, the pauses and the cache (for tests). */
 export function resetSearchState(): void {
   searchState.lastAt = 0;
-  searchState.blockedUntil = 0;
+  searchState.blockedUntil.clear();
   searchState.cache.clear();
   searchState.chain = Promise.resolve();
 }
+
+interface SearchSource {
+  name: string;
+  search: (query: string) => Promise<SearchResults>;
+}
+
+/** The sources set up in searchConfig, in the order they're tried. */
+function searchSources(): SearchSource[] {
+  const sources: SearchSource[] = [];
+  if (searchConfig.searxngUrl) sources.push({ name: "searxng", search: searxngSearch });
+  if (searchConfig.tavilyKey) sources.push({ name: "tavily", search: tavilySearch });
+  sources.push({ name: "duckduckgo", search: duckDuckGoSearch });
+  return sources;
+}
+
+const isPaused = (name: string): boolean => Date.now() < (searchState.blockedUntil.get(name) ?? 0);
 
 /** Run `fn` after every search before it, and at least SEARCH_PACING.gapMs after the last one. */
 function paced<T>(fn: () => Promise<T>): Promise<T> {
@@ -300,14 +336,134 @@ export async function webSearch(query: string): Promise<SearchResults> {
   const key = query.trim().toLowerCase();
   const cached = searchState.cache.get(key);
   if (cached && Date.now() - cached.at < SEARCH_PACING.cacheMs) return cached.result;
-  if (Date.now() < searchState.blockedUntil) return blocked();
-  const result = await paced(() => (Date.now() < searchState.blockedUntil ? Promise.resolve(blocked()) : searchOnce(query)));
-  if (result.blocked) searchState.blockedUntil = Math.max(searchState.blockedUntil, Date.now() + SEARCH_PACING.cooldownMs);
-  else if (!result.text.startsWith("Search failed")) searchState.cache.set(key, { at: Date.now(), result });
+  const sources = searchSources();
+  if (sources.every((s) => isPaused(s.name))) return blocked();
+  const result = await paced(() => searchEach(sources, query));
+  if (!result.blocked && !result.failed) searchState.cache.set(key, { at: Date.now(), result });
   return result;
 }
 
-async function searchOnce(query: string): Promise<SearchResults> {
+/** Ask each source in turn until one answers; one that refuses is paused. */
+async function searchEach(sources: SearchSource[], query: string): Promise<SearchResults> {
+  let refused = false;
+  let failure: SearchResults | null = null;
+  for (const source of sources) {
+    if (isPaused(source.name)) {
+      refused = true;
+      continue;
+    }
+    const result = await source.search(query);
+    if (result.blocked) {
+      searchState.blockedUntil.set(source.name, Date.now() + SEARCH_PACING.cooldownMs);
+      refused = true;
+    } else if (result.failed) {
+      failure ??= result;
+    } else {
+      return result;
+    }
+  }
+  // A refusal says more than an error does (the model should stop retrying).
+  return refused ? blocked() : failure ?? { text: "Search failed.", urls: [], items: [], failed: true };
+}
+
+const failed = (text: string): SearchResults => ({ text, urls: [], items: [], failed: true });
+
+const describeError = (error: unknown): string =>
+  error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")
+    ? `timed out after ${FETCH_TIMEOUT_MS / 1_000} seconds`
+    : error instanceof Error ? (error.cause instanceof Error ? error.cause.message : error.message) : String(error);
+
+/** Results as the model reads them: numbered, with URL and snippet, de-duplicated and capped. */
+function listResults(found: SearchItem[]): SearchResults {
+  const items: SearchItem[] = [];
+  const seen = new Set<string>();
+  for (const item of found) {
+    if (!item.url || seen.has(item.url)) continue;
+    seen.add(item.url);
+    items.push(item);
+    if (items.length >= SEARCH_RESULTS_LIMIT) break;
+  }
+  if (items.length === 0) return { text: "No results found.", urls: [], items: [] };
+  const text = items.map(({ title, url, snippet }, i) => `[${i + 1}] ${title}\n    URL: ${url}\n    ${snippet}`).join("\n\n");
+  return { text, urls: items.map((i) => i.url), items };
+}
+
+/** Search snippets are short; a source that sends whole paragraphs is cut down to this. */
+const SNIPPET_MAX = 400;
+const shorten = (text: string): string => {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length <= SNIPPET_MAX ? flat : flat.slice(0, SNIPPET_MAX).replace(/\s+\S*$/, "") + "…";
+};
+
+/** A SearXNG instance's JSON results. Results from all its engines arrive merged and ranked. */
+async function searxngSearch(query: string): Promise<SearchResults> {
+  const url = `${searchConfig.searxngUrl.replace(/\/+$/, "")}/search?q=${encodeURIComponent(query)}&format=json&categories=general`;
+  let response: Response;
+  try {
+    response = await fetch(url, { headers: { "User-Agent": USER_AGENT }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  } catch (error) {
+    return failed(`Search failed: SearXNG at ${searchConfig.searxngUrl} ${describeError(error)}`);
+  }
+  if (response.status === 429) return blocked();
+  if (response.status === 403) return failed("Search failed: SearXNG refused the JSON format (add json to search.formats in its settings).");
+  if (!response.ok) return failed(`Search failed: SearXNG answered with status ${response.status}`);
+
+  interface SearxngResponse {
+    results?: Array<{ title?: string; url?: string; content?: string }>;
+    unresponsive_engines?: unknown[];
+  }
+  let data: SearxngResponse;
+  try {
+    data = (await response.json()) as SearxngResponse;
+  } catch {
+    return failed("Search failed: SearXNG sent something that isn't JSON.");
+  }
+  const results = data.results ?? [];
+  // Nothing back because every engine refused or timed out isn't "no results".
+  if (results.length === 0 && (data.unresponsive_engines?.length ?? 0) > 0) return blocked();
+  return listResults(results.map((r) => ({
+    // Engines bold the matched words; as markdown that's noise, as with DuckDuckGo below.
+    title: stripHtml((r.title ?? "").replace(/<\/?b>/gi, "")),
+    url: r.url ?? "",
+    snippet: shorten(stripHtml((r.content ?? "").replace(/<\/?b>/gi, ""))),
+  })));
+}
+
+/** Tavily's search API. 429 is its rate limit and 432/433 its plan limits: refusals, not errors. */
+async function tavilySearch(query: string): Promise<SearchResults> {
+  let response: Response;
+  try {
+    response = await fetch(TAVILY_SEARCH_URL, {
+      method: "POST",
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${searchConfig.tavilyKey}`,
+      },
+      body: JSON.stringify({ query, max_results: SEARCH_RESULTS_LIMIT, search_depth: "basic" }),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+  } catch (error) {
+    return failed(`Search failed: Tavily ${describeError(error)}`);
+  }
+  if (response.status === 429 || response.status === 432 || response.status === 433) return blocked();
+  if (response.status === 401 || response.status === 403) return failed("Search failed: Tavily refused the API key (TAVILY_API_KEY).");
+  if (!response.ok) return failed(`Search failed: Tavily answered with status ${response.status}`);
+  let data: { results?: Array<{ title?: string; url?: string; content?: string }> };
+  try {
+    data = (await response.json()) as typeof data;
+  } catch {
+    return failed("Search failed: Tavily sent something that isn't JSON.");
+  }
+  return listResults((data.results ?? []).map((r) => ({
+    title: r.title ?? "",
+    url: r.url ?? "",
+    snippet: shorten(r.content ?? ""),
+  })));
+}
+
+/** DuckDuckGo's HTML results page, parsed. */
+async function duckDuckGoSearch(query: string): Promise<SearchResults> {
   const url = `${DUCKDUCKGO_SEARCH_URL}?q=${encodeURIComponent(query)}`;
 
   let response: Response;
@@ -317,12 +473,11 @@ async function searchOnce(query: string): Promise<SearchResults> {
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { text: `Search failed: ${message}`, urls: [], items: [] };
+    return failed(`Search failed: ${describeError(error)}`);
   }
 
   if (!response.ok) {
-    return { text: `Search failed with status ${response.status}`, urls: [], items: [] };
+    return failed(`Search failed with status ${response.status}`);
   }
 
   const html = await response.text();
